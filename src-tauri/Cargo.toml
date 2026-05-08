@@ -49,6 +49,21 @@ windows-core = "0.61"
 objc2 = "0.6"
 objc2-foundation = "0.3"
 objc2-web-kit = "0.3"
+# Used for the Cmd+Shift+O / titlebar-button "Reveal Pouch Folder in Finder"
+# entry points on macOS. Version aligned with wry's transitive
+# `objc2-app-kit 0.3.2` (see Cargo.lock — we add as a direct dep so the
+# explicit feature set below is always satisfied even if upstream tao/wry
+# stops requiring it transitively).
+objc2-app-kit = { version = "0.3", features = [
+    "NSButton",
+    "NSImage",
+    "NSResponder",
+    "NSView",
+    "NSViewController",
+    "NSWindow",
+    "NSTitlebarAccessoryViewController",
+    "NSLayoutConstraint",
+] }
 block2 = "0.6"
 # Used by the macOS interceptor to hop NSURLProtocolClient callbacks back onto
 # the main thread (`DispatchQueue::main().exec_async(...)`). Pinned to the same
