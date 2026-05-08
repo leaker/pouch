@@ -1,5 +1,7 @@
 {
-  "target_url": "https://www.leelib.com",
+  "startup_urls": [
+    "https://www.leelib.com"
+  ],
   "window": "screen",
   "ignore_urls": [
     { "suffix": "gstatic.com",          "comment": "Google static asset CDN (apex + all subdomains)" },

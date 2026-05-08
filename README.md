@@ -13,7 +13,7 @@ The metaphor: like a hamster stuffing food into its cheek pouch, Pouch quietly s
 
 Pouch targets two related needs: "offline-first" desktop wrappers and "local resource override" patches (for example, swapping in a patched copy of a JS file served from a CDN). It uses **platform-native network-stack interception** — every subresource request the webview engine emits while parsing HTML first goes through Rust, which then decides whether to serve a local file or hit the upstream.
 
-The whole flow is **completely transparent** to the frontend: the user sets `target_url` in `hook.config.json`, and on launch the app builds the main webview programmatically with `WebviewUrl::External(target_url)` — **no intermediate trampoline page, no IPC bridge**. The origin the webview sees on every request and response is the real `https://www.leelib.com`, so cookies, CSP, SRI, and same-origin policy all behave exactly as on the live site, with zero frontend rewriting. When you do need to inject business scripts into the target page, a separate Tampermonkey-style `inject/*.js` channel is provided — see §6.
+The whole flow is **completely transparent** to the frontend: the user lists their target URL(s) in `hook.config.json -> startup_urls`, and on launch the app builds the main webview programmatically with `WebviewUrl::External(<first entry>)` — **no intermediate trampoline page, no IPC bridge**. The origin the webview sees on every request and response is the real `https://www.leelib.com`, so cookies, CSP, SRI, and same-origin policy all behave exactly as on the live site, with zero frontend rewriting. When you do need to inject business scripts into the target page, a separate Tampermonkey-style `inject/*.js` channel is provided — see §6.
 
 How Pouch compares to a CDP-based interception approach (e.g. an Electron app driving `Fetch.requestPaused`):
 
@@ -51,11 +51,11 @@ Edit `hook.config.json` — its location depends on whether you are running a de
 
 ```json
 {
-  "target_url": "https://www.leelib.com"
+  "startup_urls": ["https://www.leelib.com"]
 }
 ```
 
-Set `target_url` to the site you want to hook. This is the **default and recommended** way to configure Pouch; other override channels are described in the priority chain in §4.2.
+`startup_urls` is an array — the first entry becomes the main window and any additional entries open as extra windows on launch (see §2.6). Setting a single-element array is the **default and recommended** way to configure Pouch. If `startup_urls` is missing, `null`, `[]`, or every entry was non-http(s), Pouch prompts the user with a native NSAlert at startup so the launch can still proceed; **Cancel exits the process** (Escape is equivalent). See §4.1 for the full schema.
 
 > **macOS first launch**: when you double-click `Pouch.app` for the first time, the directory `~/Library/Application Support/Pouch/` does not yet exist. Pouch detects this and seeds it with a copy of the sample `hook.config.json` and `inject/*.js` shipped inside the .app bundle (`Contents/Resources/sample/`). Edit those files freely afterwards — Pouch only seeds the directory on first launch and never overwrites your edits. To reset, delete the directory and relaunch.
 
@@ -83,30 +83,24 @@ bun run tauri build
 # artifacts in src-tauri/target/release/bundle/
 ```
 
-`bun install` only installs a single dev dependency: `@tauri-apps/cli`. Pouch **has no frontend runtime** — the main window is built programmatically in Rust and navigates directly to `target_url`, with no HTML trampoline page, no IPC, and no npm runtime dependencies.
+`bun install` only installs a single dev dependency: `@tauri-apps/cli`. Pouch **has no frontend runtime** — the main window is built programmatically in Rust and navigates directly to the first `startup_urls` entry, with no HTML trampoline page, no IPC, and no npm runtime dependencies.
 
-After launch the window opens directly on `target_url`, and every subresource request flows through the local interception layer. The terminal shows the full startup log:
+After launch the window opens directly on that URL, and every subresource request flows through the local interception layer. The terminal shows the full startup log:
 
 ```
-INFO hook: [config] target_url from /path/to/hook.config.json: https://www.leelib.com
-INFO hook: [startup] target_url = https://www.leelib.com
+INFO hook: [config] /path/to/hook.config.json startup_urls = 1 entrie(s)
+INFO hook: [startup] startup_urls = 1 entrie(s)
 INFO hook: [startup] cache root = /path/to/overrides
 DEBUG hook: [hook][mac] registerClass -> ok
 DEBUG hook: [hook][mac] WKBrowsingContextController.registerSchemeForCustomProtocol: https + http
 INFO hook: [hook][mac] NSURLProtocol installed; https/http routed through HookURLProtocol
 ```
 
-### 2.4 Optional environment variables and CLI arguments
+### 2.4 Optional environment variables
 
 ```bash
-# Override target_url via environment variable
-TAURI_HOOK_TARGET_URL=https://example.com/ bun run tauri dev
-
 # Tweak log level (to follow the HIT/MISS pipeline)
 TAURI_HOOK_LOG=hook=debug bun run tauri dev
-
-# A release binary also accepts argv[1] as the URL (highest priority)
-./pouch https://example.com/
 ```
 
 ### 2.5 Open DevTools
@@ -125,12 +119,12 @@ The DevTools button doubles as a state indicator: it shows the outlined `wrench.
 
 Pouch runs as a single process and supports multiple `WebviewWindow`s sharing the same WebKit data store, so cookies, `localStorage`, and the disk cache are shared across windows. There are two ways to open extra windows:
 
-1. **Startup `windows` array in `hook.config.json`** — every entry is opened as its own window when Pouch launches, alongside the main `target_url` window. See §4.1 for the schema.
+1. **`startup_urls` array in `hook.config.json`** — the first entry becomes the main window; every subsequent entry is opened as its own additional window when Pouch launches. See §4.1 for the schema.
 2. **`File → New Window` (`Cmd+N`)** — pops a native `NSAlert` (titled with a `globe` SF Symbol icon) whose accessory view is a wide `NSComboBox`: type a URL or pick from the dropdown of recently-used destinations. Pressing Return (or clicking *Open*) opens that URL as an additional window. Escape / Cancel / non-http(s) input is a quiet no-op. Recent URLs are persisted across launches in `recent_urls.json` next to `hook.config.json`, and the field starts empty so a fresh paste is unobstructed.
 
 Each window gets its own titlebar accessory (Reveal / Reload / Toggle DevTools). The DevTools button is per-window — clicking the button or pressing F12 toggles DevTools on the focused window only — while the Reveal Folder button is process-global and the Reload button still restarts the whole application (so all windows close and reopen with the freshly-read config).
 
-This feature is currently macOS-only because the New Window prompt is implemented against `NSAlert`; the rest of the multi-window plumbing is cross-platform and the startup `windows` array works on Windows too.
+The Cmd+N New Window prompt is currently macOS-only because it is implemented against `NSAlert`; the rest of the multi-window plumbing is cross-platform and the startup `startup_urls` array works on Windows too. The startup-time NSAlert that pops up when `startup_urls` is empty is also macOS-only — on Windows / Linux an empty `startup_urls` resolves with a warn log instead, and Pouch will not open a window until you populate the field.
 
 ### 2.7 Menu bar (macOS)
 
@@ -160,7 +154,7 @@ Once the page reports its real `<title>`, Tauri's `on_document_title_changed` sw
 │                                                              │
 │   The Rust side builds the main window programmatically     │
 │   with WebviewWindowBuilder, launching directly with        │
-│   WebviewUrl::External(target_url); the webview's first     │
+│   WebviewUrl::External(url); the webview's first           │
 │   frame is the real https://... origin — no intermediate    │
 │   page, no location.replace                                  │
 │                                                              │
@@ -210,10 +204,10 @@ Once the page reports its real `<title>`, Tauri's `on_document_title_changed` sw
 
 **Startup sequence** (see [`src-tauri/src/lib.rs`](src-tauri/src/lib.rs)):
 
-1. `config::load()` resolves `target_url`
+1. `config::load()` resolves `startup_urls`
 2. `hook::platform::install_global()` — pre-webview platform setup (macOS registers `NSURLProtocol` plus the private selector; Windows is a no-op)
 3. `inject::scan_inject_dir()` + `build_dispatcher_js()` — scans `inject/*.js` and assembles the dispatcher (see §6)
-4. `WebviewWindowBuilder::new(app, "main", WebviewUrl::External(target_url))` builds the webview programmatically, attaches `on_document_title_changed`, and optionally attaches the dispatcher as `initialization_script`
+4. `WebviewWindowBuilder::new(app, "main", WebviewUrl::External(startup_urls[0]))` builds the main webview programmatically, attaches `on_document_title_changed`, and optionally attaches the dispatcher as `initialization_script`. Subsequent `startup_urls` entries are opened as extra windows via `dialog::open_extra_window`. If the resolved `startup_urls` list is empty, a `dialog::prompt_initial_url` NSAlert collects a single URL from the user (Cancel exits)
 5. `hook::platform::install_for_webview(app.handle())` — post-webview platform setup (Windows attaches `WebResourceRequested` to the main window; macOS is a no-op)
 
 **Request flow** (unified logic; the platform module calls into policy from inside its interception callback):
@@ -277,11 +271,14 @@ Resolved location depends on the build (see §2.2 for the table):
 - **macOS release**: `~/Library/Application Support/Pouch/hook.config.json` (seeded on first launch from the .app bundle's `Contents/Resources/sample/`)
 - **Windows release**: next to `pouch.exe`
 
-The shipped [`hook.config.json`](hook.config.json) sets `target_url` plus a starter `ignore_urls` list demonstrating all four entry shapes (see §4.3 for the full schema):
+The shipped [`hook.config.json`](hook.config.json) sets `startup_urls` plus a starter `ignore_urls` list demonstrating all four entry shapes (see §4.3 for the full schema):
 
 ```json
 {
-  "target_url": "https://www.leelib.com",
+  "startup_urls": [
+    "https://www.leelib.com"
+  ],
+  "window": "screen",
   "ignore_urls": [
     { "suffix": "gstatic.com",          "comment": "Google static asset CDN (apex + all subdomains)" },
     { "suffix": "googletagmanager.com", "comment": "GTM / GA injection scripts" },
@@ -298,32 +295,29 @@ Fields:
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `target_url` | string (`http://` or `https://`) | No (falls through the priority chain when missing) | The real URL the main webview navigates to on launch (`WebviewUrl::External(target_url)`) |
-| `window` | `"screen"` \| `"fullscreen"` \| `{ "width": <px>, "height": <px> }` | No (default `"screen"`) | Initial window-size mode applied at launch. See §4.4. |
+| `startup_urls` | array of strings (each `http://` or `https://`) | No (missing/`null`/`[]` = prompt the user via NSAlert at startup; Cancel exits — see §2.6 / §4.2) | URLs to open at launch. The first valid entry becomes the main `WebviewWindow` (`label = "main"`, `WebviewUrl::External(url)`); every subsequent entry opens as its own extra window with shared cookies / cache and an independent webview lifecycle. Non-http(s) entries are dropped with a `warn` log. See §2.6. |
+| `window` | `"screen"` \| `"fullscreen"` \| `{ "width": <px>, "height": <px> }` | No (default `"screen"`) | Initial window-size mode applied at launch (uniformly to the main window and every extra window). See §4.4. |
 | `ignore_urls` | array of entries (one of `suffix` / `wildcard` / `url_wildcard` / `url_regex`, plus optional `comment`) | No (missing/`null`/`[]` = no filtering) | Per-entry blacklist; matched URLs are fetched but never cached. See §4.3 for the four entry shapes. |
-| `windows` | array of strings (each `http://` or `https://`) | No (missing/`null`/`[]` = no extra windows) | Additional URLs to open as separate `WebviewWindow`s on launch (in addition to `target_url`). Each gets its own native window with shared cookies / cache and an independent webview lifecycle. Non-http(s) entries are dropped with a `warn` log. See §2.6. |
 
-### 4.2 Priority chain
+> **Schema break in v1.1**: the previous fields `target_url` (single string) and `windows` (array) have been **unified into the single `startup_urls` array**. There is no deprecation alias — users upgrading from v1.0.x must edit `hook.config.json` by hand. The `TAURI_HOOK_TARGET_URL` environment variable and the `argv[1]` URL override have also been removed in the same change (everything goes through `startup_urls` now).
+
+### 4.2 Resolution
 
 Source: [`src-tauri/src/config.rs`](src-tauri/src/config.rs)
 
-`target_url` resolution order (**first matching source wins; every step falls through to the next on failure or absence, and never panics**):
+`startup_urls` is read from `hook.config.json` only — there is no CLI / env override channel. Resolution **never panics**:
 
-1. **CLI argv[1]**: only useful for release binaries, e.g. `./pouch https://example.com/`. Must start with `http://` or `https://`
-2. **Environment variable `TAURI_HOOK_TARGET_URL`**: same http(s) requirement; otherwise warn and skip
-3. **`hook.config.json`**: in dev mode, `<CARGO_MANIFEST_DIR>/../hook.config.json` (the repo root); in macOS release mode, `~/Library/Application Support/Pouch/hook.config.json` (seeded from `Pouch.app/Contents/Resources/sample/` on first launch); in Windows release mode, next to `pouch.exe`; cwd is consulted as a last-ditch fallback in every mode
-4. **Built-in default fallback**: `https://www.leelib.com`
+1. **`hook.config.json`** is read from: in dev mode, `<CARGO_MANIFEST_DIR>/../hook.config.json` (the repo root); in macOS release mode, `~/Library/Application Support/Pouch/hook.config.json` (seeded from `Pouch.app/Contents/Resources/sample/` on first launch); in Windows release mode, next to `pouch.exe`; `<cwd>/hook.config.json` is consulted as a last-ditch fallback in every mode. The first candidate that parses wins.
+2. Each entry is filtered to http(s); non-http(s) entries are dropped with a `warn` log.
+3. **Empty resolved list** (file missing, field omitted, `null`, `[]`, or every entry was non-http(s)) → on macOS, `dialog::prompt_initial_url` pops a native `NSAlert` titled "Welcome to Pouch" asking for a URL; OK opens that URL as the main window, Cancel / Escape calls `std::process::exit(0)`. On Windows / Linux there is no prompt UI, so an empty list is logged at WARN and Pouch refuses to open a window — populate the file and relaunch.
 
-Each successful step prints an INFO log, e.g.:
+A successful parse prints an INFO log, e.g.:
 
 ```
-INFO hook: [config] target_url from CLI arg: https://...
-INFO hook: [config] target_url from TAURI_HOOK_TARGET_URL: https://...
-INFO hook: [config] target_url from /path/to/hook.config.json: https://...
-[config] no target_url provided; using default https://www.leelib.com   # nothing matched
+INFO hook: [config] /path/to/hook.config.json startup_urls = 1 entrie(s)
 ```
 
-> Design note: an earlier internal design called for "panic on missing config", but this was relaxed to "log + fall through" so that Pouch runs out of the box after a clone. If you want strict fail-fast behaviour, change `config::load` in your fork.
+> Design note: an earlier internal design called for "panic on missing config", but this was relaxed to "log + fall through" so that Pouch runs out of the box after a clone. The startup-time NSAlert prompt closes the loop on macOS — the user can rescue a missing / empty config without re-opening it manually first.
 
 ### 4.3 `ignore_urls` blacklist
 
@@ -405,7 +399,7 @@ TAURI_HOOK_LOG=hook=debug bun run tauri dev
 TAURI_HOOK_LOG=off bun run tauri dev
 ```
 
-Sample log output (validated end-to-end on macOS — the lead ran it twice with `target_url = https://www.leelib.com`):
+Sample log output (validated end-to-end on macOS — the lead ran it twice with `startup_urls = ["https://www.leelib.com"]`):
 
 ```
 # First launch (overrides/ empty):
@@ -586,7 +580,7 @@ INFO hook: [startup] inject rules = 2 (dispatcher WILL be attached)
 - **POST / non-GET is not cached**: `policy::evaluate` only handles GET. The platform layer checks the method at the entry point and lets non-GET through directly (the macOS path returns NO from `+canInitWithRequest:`; the Windows path returns from the handler without calling `SetResponse`), letting the webview use its default network stack
 - **No HTTP conditional requests**: `http_fetcher::fetch` actively strips `If-None-Match` / `If-Modified-Since` / `If-Match` / `If-Unmodified-Since` / `If-Range`, always pulling the full body. Hits serve from cache without a conditional request; ETag / Last-Modified are recorded in the sidecar for future use only
 - **fragment is dropped from the cache key**: `#a` and `#b` share one cache entry (this is correct per HTTP — fragments never reach the server). Distinct query strings, on the other hand, **do** map to distinct cache entries (`?v=1` and `?v=2` are stored separately) so dynamic signed URLs like `?time=…&sign=…` no longer replay stale tokens — see §5.2
-- **Top-level navigation also goes through the interceptor**: the webview is started programmatically with `WebviewUrl::External(target_url)`, and the first frame's top-level document request is **also** covered by the native interception layer (macOS NSURLProtocol and Windows WebView2 WebResourceRequested both catch it), so `index.html` is cached on first launch
+- **Top-level navigation also goes through the interceptor**: the main webview is started programmatically with `WebviewUrl::External(startup_urls[0])`, and the first frame's top-level document request is **also** covered by the native interception layer (macOS NSURLProtocol and Windows WebView2 WebResourceRequested both catch it), so `index.html` is cached on first launch
 - **JS injection does not re-run on SPA route changes**: `inject/*.js` runs once at document_start; pseudo-navigations performed by frontend frameworks via `history.pushState` will **not** re-trigger the rules. Hook the history API yourself if you need to react to route changes (see §6.2)
 - **`@match *` matches every URL**: including `about:blank` and `data:` subframes. Narrow it to at least `@match https://*` to match only http(s) origins
 - **macOS / Windows only**: Linux does not work (see §7)
@@ -627,7 +621,7 @@ For context, here is how Pouch differs in detail from a CDP-driven interception 
 pouch/
 ├── README.md              # this document
 ├── LICENSE                # MIT
-├── hook.config.json       # user config: target_url
+├── hook.config.json       # user config: startup_urls + window + ignore_urls
 ├── package.json           # only one devDep: @tauri-apps/cli
 ├── bun.lock
 ├── inject/                # user-script directory (see §6)
@@ -662,7 +656,7 @@ pouch/
     └── decisions/
 ```
 
-> Architectural note: there is no `frontend/` directory and no `commands.rs` — Pouch deliberately has zero frontend runtime and zero IPC surface. `tauri.conf.json` does not declare `build`, `app.security`, or `app.withGlobalTauri`; the main window is built programmatically in `lib.rs` with `WebviewWindowBuilder::new(..., WebviewUrl::External(target_url))`.
+> Architectural note: there is no `frontend/` directory and no `commands.rs` — Pouch deliberately has zero frontend runtime and zero IPC surface. `tauri.conf.json` does not declare `build`, `app.security`, or `app.withGlobalTauri`; the main window is built programmatically in `lib.rs` with `WebviewWindowBuilder::new(app, "main", WebviewUrl::External(startup_urls[0]))`.
 
 ## 11. License
 

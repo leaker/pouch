@@ -9,10 +9,10 @@
 //!   registration is in place when the very first https navigation fires
 //!   (Windows `install_global` is a no-op — see `hook/platform/mod.rs`).
 //! - Builds the main `WebviewWindow` programmatically with
-//!   `WebviewUrl::External(target_url)` so the webview navigates straight to
-//!   the upstream origin; no frontend trampoline page exists. The
-//!   `initialization_script` carrying the URL-rule JS dispatcher (see
-//!   [`inject`]) runs on every top-level navigation, so user-supplied
+//!   `WebviewUrl::External(<first startup_urls entry>)` so the webview
+//!   navigates straight to the upstream origin; no frontend trampoline page
+//!   exists. The `initialization_script` carrying the URL-rule JS dispatcher
+//!   (see [`inject`]) runs on every top-level navigation, so user-supplied
 //!   `inject/*.js` rules apply on the live target site.
 //!   We deliberately do NOT call `.title(...)` so the upstream `<title>` wins.
 //!   To actually propagate `document.title` -> window title we register
@@ -315,7 +315,11 @@ pub fn run() {
             // 1a. Load config (now that bootstrap, if applicable, has
             //     populated the user-data dir).
             let cfg = config::load();
-            tracing::info!(target: "hook", "[startup] target_url = {}", cfg.target_url);
+            tracing::info!(
+                target: "hook",
+                "[startup] startup_urls = {} entrie(s)",
+                cfg.startup_urls.len()
+            );
             tracing::info!(
                 target: "hook",
                 "[startup] cache root = {}",
@@ -326,7 +330,7 @@ pub fn run() {
             // handler — which only has `&AppHandle`, not the original
             // `Config` — applies the same maximize / fullscreen / fixed-size
             // mode to runtime-spawned extra windows that the main window
-            // and the startup `windows` array use. See
+            // and the startup_urls array use. See
             // `dialog::cache_window_config` for the storage rationale.
             dialog::cache_window_config(cfg.window);
 
@@ -339,11 +343,6 @@ pub fn run() {
             //    `app.restart()` (see [`reload_from_config`] doc /
             //    README §2.5).
             let rules = inject::scan_inject_dir();
-
-            // 3. Build the main webview programmatically. The label is
-            //    hard-wired to `"main"` because Windows hook installation
-            //    (`hook::platform::windows::install_for_webview`) looks up
-            //    the main webview by that label.
             let dispatcher = inject::build_dispatcher_js(&rules);
             tracing::info!(
                 target: "hook",
@@ -352,189 +351,148 @@ pub fn run() {
                 if dispatcher.is_some() { "WILL be" } else { "will NOT be" },
             );
 
-            // `tauri::Error::InvalidUrl(url::ParseError)` is the natural
-            // conversion for a target_url string that doesn't parse — the
-            // variant exists for exactly this case. We log the offending
-            // string ourselves first so the `url::ParseError`'s opaque
-            // message ("relative URL without a base" etc.) doesn't leave
-            // the operator guessing which value triggered it.
-            let target_url: url::Url = cfg.target_url.parse().map_err(|e| {
-                tracing::error!(
-                    target: "hook",
-                    "[main-window] invalid target_url {:?}: {}",
-                    cfg.target_url, e
-                );
-                tauri::Error::InvalidUrl(e)
-            })?;
-
-            let mut builder = WebviewWindowBuilder::new(
-                app,
-                "main",
-                WebviewUrl::External(target_url),
-            )
-            // Set the loading title at builder time so the NSWindow / HWND
-            // is born with `⏳ Loading...` as its initial title — this
-            // closes the visual gap between window creation and the first
-            // post-build `set_title` call, where the user could otherwise
-            // glimpse the default Tauri / label-derived title for a frame.
-            // Builder-time `.title(...)` forwards to wry, which calls
-            // `NSWindow.setTitle:` / `SetWindowTextW` before the window is
-            // ordered front. The post-build `set_title` below is kept as a
-            // redundant fallback in case `.title` silently no-ops on some
-            // platform.
-            .title(LOADING_TITLE)
-            .resizable(true)
-            // Enable the Web Inspector for both debug and release builds —
-            // pouch is a hook-debugging tool, not a shrink-wrapped end-user
-            // product. Pairs with the `tauri = { features = ["devtools"] }`
-            // flag in Cargo.toml so the underlying `open_devtools` symbol
-            // is compiled in for release as well.
-            .devtools(true)
-            // Native bridge from WKWebView/WebView2's title KVO to the
-            // Tauri window title. Fires on initial load AND on every
-            // SPA-style `document.title = ...` mutation, so we don't need
-            // a JS MutationObserver / IPC trampoline.
-            .on_document_title_changed(|window, title| {
-                if title.trim().is_empty() {
-                    return;
-                }
-                if let Err(e) = window.set_title(&title) {
-                    tracing::warn!(
-                        target: "hook",
-                        "[title-sync] set_title({:?}) failed: {}",
-                        title,
-                        e
-                    );
-                }
-            })
-            .on_page_load(page_load_handler());
-
-            // Apply the user-configured window-size mode. We always set
-            // `fullscreen` and `maximized` explicitly (defaulting to false)
-            // so mode switches in `hook.config.json` are deterministic
-            // across launches — never depending on a previous build's
-            // leftover state.
+            // 3. Build the main webview + any extra startup windows from
+            //    `cfg.startup_urls`. The first valid entry becomes the main
+            //    window (label "main" — hard-wired because the Windows hook
+            //    installation `hook::platform::windows::install_for_webview`
+            //    looks the main webview up by that label); subsequent valid
+            //    entries become extra windows with auto-allocated labels.
             //
-            // Builder-time `.maximized(true)` is the cross-platform idiom
-            // for "fill the work area" (excludes macOS menubar/dock and
-            // Windows taskbar) — wry forwards it to NSWindow.zoom: /
-            // ShowWindow(SW_MAXIMIZE) which both honour the OS work area
-            // natively. See
-            // <https://docs.rs/tauri/2.9.5/tauri/webview/struct.WebviewWindowBuilder.html#method.maximized>.
-            //
-            // We also chain `.inner_size(...)` on every branch (using
-            // DEFAULT_WINDOW_{WIDTH,HEIGHT} when the user didn't pin an
-            // explicit size) so the un-maximize / un-fullscreen gesture
-            // restores the window to a sensible 1280x960 instead of wry's
-            // 800x600 platform default.
-            builder = match cfg.window {
-                WindowConfig::Mode(WindowMode::Screen) => builder
-                    .fullscreen(false)
-                    .maximized(true)
-                    .inner_size(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT),
-                WindowConfig::Mode(WindowMode::Fullscreen) => builder
-                    .fullscreen(true)
-                    .maximized(false)
-                    .inner_size(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT),
-                WindowConfig::Size { width, height } if width > 0 && height > 0 => builder
-                    .fullscreen(false)
-                    .maximized(false)
-                    .inner_size(f64::from(width), f64::from(height)),
-                WindowConfig::Size { width, height } => {
-                    tracing::warn!(
+            //    Empty resolved list → prompt the user via NSAlert for a
+            //    single URL. Cancel exits the process; otherwise the typed
+            //    URL becomes the main window. Non-macOS builds fall back to
+            //    the historical default URL because `dialog::prompt_initial_url`
+            //    is macOS-only.
+            if cfg.startup_urls.is_empty() {
+                let entered = {
+                    #[cfg(target_os = "macos")]
+                    {
+                        dialog::prompt_initial_url()
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    {
+                        tracing::warn!(
+                            target: "hook",
+                            "[startup] startup_urls is empty and NSAlert prompt is macOS-only; \
+                             populate hook.config.json -> startup_urls to launch on non-macOS."
+                        );
+                        None::<String>
+                    }
+                };
+                let Some(raw) = entered else {
+                    tracing::info!(
                         target: "hook",
-                        "[main-window] window size {{ width: {}, height: {} }} has a zero dimension; falling back to default (screen)",
-                        width,
-                        height
+                        "[startup] no URL provided; exiting"
                     );
-                    builder
-                        .fullscreen(false)
-                        .maximized(true)
-                        .inner_size(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT)
+                    std::process::exit(0);
+                };
+                let trimmed = raw.trim();
+                let url: url::Url = trimmed.parse().map_err(|e| {
+                    tracing::error!(
+                        target: "hook",
+                        "[main-window] entered URL {:?} did not parse: {}",
+                        trimmed, e
+                    );
+                    tauri::Error::InvalidUrl(e)
+                })?;
+                if url.scheme() != "http" && url.scheme() != "https" {
+                    tracing::error!(
+                        target: "hook",
+                        "[main-window] entered URL is not http(s); exiting: {}",
+                        url
+                    );
+                    std::process::exit(0);
                 }
-            };
+                create_main_window_with_url(app, url, cfg.window, dispatcher.as_deref())?;
+            } else {
+                for (i, url_str) in cfg.startup_urls.iter().enumerate() {
+                    // We pre-validated http(s) prefix at config load time,
+                    // but `url::Url::parse` can still reject malformed
+                    // values (e.g. `https://`). Skip those with a warn
+                    // rather than crashing the whole launch.
+                    let url: url::Url = match url_str.parse() {
+                        Ok(u) => u,
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "hook",
+                                "[startup] startup_urls[{}] parse failed for {:?}: {}",
+                                i, url_str, e
+                            );
+                            continue;
+                        }
+                    };
+                    if i == 0 {
+                        create_main_window_with_url(app, url, cfg.window, dispatcher.as_deref())?;
+                    } else {
+                        let label = dialog::next_window_label();
+                        if let Err(e) =
+                            dialog::open_extra_window(app.handle(), &label, url, cfg.window)
+                        {
+                            tracing::warn!(
+                                target: "hook",
+                                "[startup] failed to create extra window {label}: {e}"
+                            );
+                        }
+                    }
+                }
 
-            if let Some(js) = dispatcher.as_deref() {
-                builder = builder.initialization_script(js);
-            }
-
-            let main_window = builder.build()?;
-            tracing::debug!(
-                target: "hook",
-                "[window] created label=main url={}",
-                cfg.target_url
-            );
-            // Set the loading title prefix immediately on window creation so
-            // the user sees feedback the moment the window appears — the
-            // page-load `Started` event only fires after the WKWebView has
-            // received navigation first-byte, which can lag the window's
-            // first paint by hundreds of ms (webview process spin-up + DNS /
-            // TLS / server response). The `on_page_load(Started)` handler
-            // re-sets the same title later (idempotent), and `Finished`
-            // only swaps it for the host-derived fallback if the page
-            // never produced a `<title>` — see [`page_load_handler`].
-            if let Err(e) = main_window.set_title(LOADING_TITLE) {
-                tracing::warn!(
-                    target: "hook",
-                    "[startup] main window initial set_title(loading) failed: {e}"
-                );
-            }
-
-            // 3b. macOS-only: drop three SF Symbol buttons into the right
-            //     side of the titlebar — Reveal Folder / Reload / Open
-            //     DevTools. Each pairs with a `View` submenu entry and
-            //     they share the same handlers (so the keyboard shortcut
-            //     and the button do exactly the same thing). Failures
-            //     here are non-fatal (we still have the menubar entries).
-            #[cfg(target_os = "macos")]
-            if let Some(window) = app.get_webview_window("main") {
-                if let Err(e) = titlebar::install_titlebar_accessory(app.handle(), &window) {
+                // Defensive: if every entry failed parsing above, we never
+                // built a "main" window. Fall through to the prompt path so
+                // the user can rescue the launch instead of staring at a
+                // dockless background process.
+                if app.get_webview_window("main").is_none() {
                     tracing::warn!(
                         target: "hook",
-                        "[startup] titlebar accessory install failed: {}",
-                        e
+                        "[startup] startup_urls had entries but none parsed; prompting user"
                     );
+                    let entered = {
+                        #[cfg(target_os = "macos")]
+                        {
+                            dialog::prompt_initial_url()
+                        }
+                        #[cfg(not(target_os = "macos"))]
+                        {
+                            None::<String>
+                        }
+                    };
+                    let Some(raw) = entered else {
+                        tracing::info!(
+                            target: "hook",
+                            "[startup] no URL provided; exiting"
+                        );
+                        std::process::exit(0);
+                    };
+                    let trimmed = raw.trim();
+                    let url: url::Url = trimmed.parse().map_err(|e| {
+                        tracing::error!(
+                            target: "hook",
+                            "[main-window] entered URL {:?} did not parse: {}",
+                            trimmed, e
+                        );
+                        tauri::Error::InvalidUrl(e)
+                    })?;
+                    if url.scheme() != "http" && url.scheme() != "https" {
+                        tracing::error!(
+                            target: "hook",
+                            "[main-window] entered URL is not http(s); exiting: {}",
+                            url
+                        );
+                        std::process::exit(0);
+                    }
+                    create_main_window_with_url(app, url, cfg.window, dispatcher.as_deref())?;
                 }
             }
 
             // 4. Post-webview platform setup (Windows WebView2
-            //    WebResourceRequested handler; no-op on macOS).
+            //    WebResourceRequested handler; no-op on macOS). Runs once
+            //    after the main window exists regardless of which startup
+            //    branch above produced it.
             if let Err(e) = hook::platform::install_for_webview(app.handle()) {
                 tracing::error!(
                     target: "hook",
                     "[startup] install_for_webview failed: {}",
                     e
                 );
-            }
-
-            // 5. Open additional startup windows declared in
-            //    `hook.config.json -> windows`. Each gets its own
-            //    `WebviewWindow` (label assigned via the same atomic
-            //    counter the Cmd+N New Window menu uses, so the two paths
-            //    can never collide on labels) and its own titlebar
-            //    accessory on macOS. Cookies / cache are shared with the
-            //    main window — Tauri v2's default is one shared
-            //    `WKWebViewConfiguration` / `ICoreWebView2Environment`
-            //    per process. See README §2.6.
-            for url_str in cfg.windows.iter() {
-                let label = dialog::next_window_label();
-                let url: url::Url = match url_str.parse() {
-                    Ok(u) => u,
-                    Err(e) => {
-                        tracing::warn!(
-                            target: "hook",
-                            "[startup] windows entry url parse failed for {:?}: {}",
-                            url_str, e
-                        );
-                        continue;
-                    }
-                };
-                if let Err(e) = dialog::open_extra_window(app.handle(), &label, url, cfg.window) {
-                    tracing::warn!(
-                        target: "hook",
-                        "[startup] failed to create extra window {label}: {e}"
-                    );
-                }
             }
 
             Ok(())
@@ -567,6 +525,150 @@ pub fn run() {
             std::process::exit(1);
         }
     }
+}
+
+/// Build the `"main"`-labelled `WebviewWindow` that anchors a Pouch launch.
+/// Shared by every startup path that has to produce a main window — the
+/// regular `cfg.startup_urls[0]` case, the empty-config NSAlert prompt
+/// fallback, and the every-entry-failed defensive prompt — so the builder
+/// chain (devtools / title-sync / page-load / window-mode / dispatcher
+/// init-script) and the post-build wiring (initial set_title +
+/// macOS titlebar accessory) live in exactly one place.
+///
+/// The label is hard-wired to `"main"` because Windows hook installation
+/// (`hook::platform::windows::install_for_webview`) looks the main webview
+/// up by that label — extra windows go through
+/// [`dialog::open_extra_window`] instead, which assigns labels via
+/// [`dialog::next_window_label`].
+///
+/// `dispatcher` is the optional `inject/*.js` rule dispatcher built by
+/// [`inject::build_dispatcher_js`]; passed by reference so the same string
+/// can be applied to multiple windows without cloning.
+fn create_main_window_with_url(
+    app: &tauri::App,
+    url: url::Url,
+    window_config: WindowConfig,
+    dispatcher: Option<&str>,
+) -> tauri::Result<WebviewWindow> {
+    let url_for_log = url.to_string();
+    let mut builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
+        // Set the loading title at builder time so the NSWindow / HWND
+        // is born with `⏳ Loading...` as its initial title — this
+        // closes the visual gap between window creation and the first
+        // post-build `set_title` call, where the user could otherwise
+        // glimpse the default Tauri / label-derived title for a frame.
+        // Builder-time `.title(...)` forwards to wry, which calls
+        // `NSWindow.setTitle:` / `SetWindowTextW` before the window is
+        // ordered front. The post-build `set_title` below is kept as a
+        // redundant fallback in case `.title` silently no-ops on some
+        // platform.
+        .title(LOADING_TITLE)
+        .resizable(true)
+        // Enable the Web Inspector for both debug and release builds —
+        // pouch is a hook-debugging tool, not a shrink-wrapped end-user
+        // product. Pairs with the `tauri = { features = ["devtools"] }`
+        // flag in Cargo.toml so the underlying `open_devtools` symbol
+        // is compiled in for release as well.
+        .devtools(true)
+        // Native bridge from WKWebView/WebView2's title KVO to the
+        // Tauri window title. Fires on initial load AND on every
+        // SPA-style `document.title = ...` mutation, so we don't need
+        // a JS MutationObserver / IPC trampoline.
+        .on_document_title_changed(|window, title| {
+            if title.trim().is_empty() {
+                return;
+            }
+            if let Err(e) = window.set_title(&title) {
+                tracing::warn!(
+                    target: "hook",
+                    "[title-sync] set_title({:?}) failed: {}",
+                    title,
+                    e
+                );
+            }
+        })
+        .on_page_load(page_load_handler());
+
+    // Apply the user-configured window-size mode. We always set
+    // `fullscreen` and `maximized` explicitly (defaulting to false)
+    // so mode switches in `hook.config.json` are deterministic
+    // across launches — never depending on a previous build's
+    // leftover state.
+    //
+    // Builder-time `.maximized(true)` is the cross-platform idiom
+    // for "fill the work area" (excludes macOS menubar/dock and
+    // Windows taskbar) — wry forwards it to NSWindow.zoom: /
+    // ShowWindow(SW_MAXIMIZE) which both honour the OS work area
+    // natively. See
+    // <https://docs.rs/tauri/2.9.5/tauri/webview/struct.WebviewWindowBuilder.html#method.maximized>.
+    //
+    // We also chain `.inner_size(...)` on every branch (using
+    // DEFAULT_WINDOW_{WIDTH,HEIGHT} when the user didn't pin an
+    // explicit size) so the un-maximize / un-fullscreen gesture
+    // restores the window to a sensible 1280x960 instead of wry's
+    // 800x600 platform default.
+    builder = match window_config {
+        WindowConfig::Mode(WindowMode::Screen) => builder
+            .fullscreen(false)
+            .maximized(true)
+            .inner_size(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT),
+        WindowConfig::Mode(WindowMode::Fullscreen) => builder
+            .fullscreen(true)
+            .maximized(false)
+            .inner_size(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT),
+        WindowConfig::Size { width, height } if width > 0 && height > 0 => builder
+            .fullscreen(false)
+            .maximized(false)
+            .inner_size(f64::from(width), f64::from(height)),
+        WindowConfig::Size { width, height } => {
+            tracing::warn!(
+                target: "hook",
+                "[main-window] window size {{ width: {}, height: {} }} has a zero dimension; falling back to default (screen)",
+                width,
+                height
+            );
+            builder
+                .fullscreen(false)
+                .maximized(true)
+                .inner_size(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT)
+        }
+    };
+
+    if let Some(js) = dispatcher {
+        builder = builder.initialization_script(js);
+    }
+
+    let main_window = builder.build()?;
+    tracing::debug!(
+        target: "hook",
+        "[window] created label=main url={}",
+        url_for_log
+    );
+    // Set the loading title prefix immediately on window creation so
+    // the user sees feedback the moment the window appears — see the
+    // builder-time `.title(...)` comment above for the reasoning.
+    if let Err(e) = main_window.set_title(LOADING_TITLE) {
+        tracing::warn!(
+            target: "hook",
+            "[startup] main window initial set_title(loading) failed: {e}"
+        );
+    }
+
+    // macOS-only: drop three SF Symbol buttons into the right side of the
+    // titlebar — Reveal Folder / Reload / Open DevTools. Failures here are
+    // non-fatal (we still have the menubar entries).
+    #[cfg(target_os = "macos")]
+    if let Some(window) = app.get_webview_window("main") {
+        if let Err(e) = titlebar::install_titlebar_accessory(app.handle(), &window) {
+            tracing::warn!(
+                target: "hook",
+                "[startup] titlebar accessory install failed: {}",
+                e
+            );
+        }
+    }
+
+    Ok(main_window)
 }
 
 /// Reload by restarting the application. `hook.config.json` and

@@ -13,8 +13,9 @@
 //! non-empty existence (no merge, no overwrite, no resurrection).
 //!
 //! Failures are logged at WARN and never abort startup: pouch's resolver
-//! falls through to its built-in `target_url` default and an empty `inject/`
-//! result if the user-data directory ends up empty, so a missing or unreadable
+//! falls through to an empty `startup_urls` (which the launch path then
+//! handles by prompting the user via NSAlert) and an empty `inject/` result
+//! if the user-data directory ends up empty, so a missing or unreadable
 //! sample bundle just looks like "ran with no config" — the same fallback
 //! behaviour we already use for power-loss / disk-full corner cases.
 //!
@@ -63,8 +64,9 @@ mod macos {
     /// reliable "have we bootstrapped?" signal.
     ///
     /// Logs everything at INFO/WARN and never panics. Errors are warned and
-    /// swallowed because pouch can still boot with no config — the user just
-    /// gets the built-in `target_url` fallback.
+    /// swallowed because pouch can still boot with no config — the launch
+    /// path then prompts the user via NSAlert when `startup_urls` resolves
+    /// empty.
     pub fn bootstrap_macos_user_dir(app: &AppHandle) {
         let Some(user_dir) = macos_app_support_dir() else {
             warn!(

@@ -1,19 +1,24 @@
 //! Startup configuration loader for Pouch.
 //!
-//! Resolution order (first hit wins, every step is non-fatal):
-//! 1. `argv[1]` if it parses as `http(s)://...` — handy for `cargo run -- https://...`.
-//! 2. `TAURI_HOOK_TARGET_URL` environment variable.
-//! 3. `hook.config.json` (resolved by [`crate::util::user_data_path`]):
-//!    - dev: `<CARGO_MANIFEST_DIR>/../hook.config.json` (i.e. repo root).
-//!    - macOS prod: `~/Library/Application Support/Pouch/hook.config.json`.
-//!    - Windows / Linux prod: same directory as the running binary.
-//! 4. Built-in fallback: `https://www.leelib.com`.
+//! `hook.config.json` is read from (resolved by [`crate::util::user_data_path`]):
+//!   - dev: `<CARGO_MANIFEST_DIR>/../hook.config.json` (i.e. repo root).
+//!   - macOS prod: `~/Library/Application Support/Pouch/hook.config.json`.
+//!   - Windows / Linux prod: same directory as the running binary.
+//!
+//! `cwd / hook.config.json` is consulted as a last-ditch fallback.
 //!
 //! Failures at any step are logged at `warn` and we fall through to the next
-//! source; Pouch should always boot successfully even with no config present
-//! (an earlier internal design called for panic-on-missing, but this was
-//! relaxed to "log + fall through" so Pouch runs out of the box after a
-//! clone).
+//! candidate; Pouch should always boot successfully even with no config
+//! present (an earlier internal design called for panic-on-missing, but this
+//! was relaxed to "log + fall through" so Pouch runs out of the box after a
+//! clone — and an empty resolved `startup_urls` list is handled at startup
+//! by prompting the user for a URL via `NSAlert`; see `lib.rs::run`).
+//!
+//! Schema note: as of v1.1, the per-window URL fields `target_url` (single)
+//! and `windows` (array) have been **unified** into a single `startup_urls`
+//! array — first entry becomes the main window, the rest become extra
+//! windows. This is a hard schema break with no deprecation alias; users
+//! upgrading from v1.0.x must migrate their `hook.config.json` by hand.
 
 use std::path::PathBuf;
 
@@ -23,29 +28,37 @@ use tracing::{info, warn};
 use crate::hook::ignore_filter::IgnoreEntry;
 use crate::util::{pretty_path, user_data_path, UserDataKind};
 
-/// Default fallback URL when no other source provides one.
-pub const DEFAULT_TARGET_URL: &str = "https://www.leelib.com";
-
 /// Runtime configuration injected as a Tauri `State`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
-    pub target_url: String,
+    /// Resolved list of URLs to open at startup. The first entry becomes the
+    /// main `"main"`-labelled window; subsequent entries become extra windows
+    /// labelled by [`crate::dialog::next_window_label`]. All entries are
+    /// guaranteed to be valid http(s) URL **strings** at this point —
+    /// non-http(s) entries are dropped at load time with a `warn` log
+    /// (per-entry URL parsing for window creation still happens at use site
+    /// in `lib.rs::run`). Empty when the JSON omits the field, supplies
+    /// `null`, supplies `[]`, or every entry was dropped as invalid; the
+    /// startup path then prompts the user via `NSAlert`.
+    #[serde(default)]
+    pub startup_urls: Vec<String>,
     /// Resolved window-size mode (never `Option` — defaults to
     /// [`WindowConfig::default`] when missing from the JSON).
     #[serde(default)]
     pub window: WindowConfig,
-    /// Resolved list of additional startup windows. Each entry is a valid
-    /// http(s) URL; invalid / non-http(s) entries are dropped at load time
-    /// with a `warn` log. Empty when missing from the JSON. See README §4.x.
-    #[serde(default)]
-    pub windows: Vec<String>,
 }
 
 /// On-disk schema for `hook.config.json`. Kept separate from `Config` so
 /// future fields can be optional in the file but always-resolved at runtime.
 #[derive(Debug, Deserialize)]
 struct ConfigFile {
-    target_url: Option<String>,
+    /// Optional list of URLs to open at startup. First entry becomes the
+    /// main window, subsequent entries become extra windows. Each entry must
+    /// be http(s); non-http(s) / unparseable entries are dropped with a warn
+    /// at load time. Missing / null / empty all mean "prompt the user via
+    /// NSAlert at startup" — see `lib.rs::run`.
+    #[serde(default)]
+    startup_urls: Option<Vec<String>>,
     /// Optional window-size config. Missing → [`WindowConfig::default`].
     #[serde(default)]
     window: Option<WindowConfig>,
@@ -54,12 +67,6 @@ struct ConfigFile {
     /// startup; missing/null/empty all mean "no filtering".
     #[serde(default)]
     ignore_urls: Option<Vec<IgnoreEntry>>,
-    /// Optional list of additional URLs to open as separate startup windows
-    /// (in addition to the main `target_url` window). Each entry must be
-    /// http(s); non-http(s) / unparseable entries are dropped with a warn
-    /// at load time. Missing / null / empty all mean "no extra windows".
-    #[serde(default)]
-    windows: Option<Vec<String>>,
 }
 
 /// Initial window-size mode.
@@ -93,66 +100,21 @@ impl Default for WindowConfig {
     }
 }
 
-/// Load the runtime configuration following the resolution chain documented
-/// at the module level. Never panics.
+/// Load the runtime configuration from `hook.config.json`. Never panics.
 ///
-/// Side effect: regardless of which source supplies `target_url`, the
-/// `hook.config.json` file is still consulted (best-effort) to install
-/// `ignore_urls` rules into the global matcher set — `target_url` precedence
-/// (CLI > env > json > default) and `ignore_urls` loading are independent.
+/// Side effect: regardless of whether `startup_urls` is present, the
+/// `hook.config.json` file's `ignore_urls` rules are installed into the
+/// global matcher set — these concerns are independent.
 ///
 /// Safe to call multiple times: the ignore-rule installation is an atomic
 /// replace (see [`crate::hook::ignore_filter::set_matchers`]), so the runtime
 /// Reload path simply re-invokes [`load`] to pick up edits to
 /// `hook.config.json` without restarting.
 pub fn load() -> Config {
-    // Always look at the JSON config first so its `ignore_urls` rules get
-    // installed even when `target_url` is overridden via CLI / env.
-    // We also pull the optional `window` field out here so the same JSON read
-    // serves both target-url-fallback and window-config purposes.
-    let (json_target_url, window, windows) = from_config_file();
-
-    if let Some(url) = from_cli_args() {
-        info!(target: "hook", "[config] target_url from CLI arg: {}", url);
-        return Config {
-            target_url: url,
-            window,
-            windows,
-        };
-    }
-
-    if let Some(url) = from_env() {
-        info!(target: "hook", "[config] target_url from TAURI_HOOK_TARGET_URL: {}", url);
-        return Config {
-            target_url: url,
-            window,
-            windows,
-        };
-    }
-
-    if let Some((url, path)) = json_target_url {
-        info!(
-            target: "hook",
-            "[config] target_url from {}: {}",
-            pretty_path(&path).display(),
-            url
-        );
-        return Config {
-            target_url: url,
-            window,
-            windows,
-        };
-    }
-
-    warn!(
-        target: "hook",
-        "[config] no target_url provided; using default {}",
-        DEFAULT_TARGET_URL
-    );
+    let (startup_urls, window) = from_config_file();
     Config {
-        target_url: DEFAULT_TARGET_URL.to_string(),
+        startup_urls,
         window,
-        windows,
     }
 }
 
@@ -160,55 +122,28 @@ fn looks_like_url(s: &str) -> bool {
     s.starts_with("http://") || s.starts_with("https://")
 }
 
-fn from_cli_args() -> Option<String> {
-    let arg = std::env::args().nth(1)?;
-    if looks_like_url(&arg) {
-        Some(arg)
-    } else {
-        None
-    }
-}
-
-fn from_env() -> Option<String> {
-    let raw = std::env::var("TAURI_HOOK_TARGET_URL").ok()?;
-    if looks_like_url(&raw) {
-        Some(raw)
-    } else {
-        warn!(
-            target: "hook",
-            "[config] TAURI_HOOK_TARGET_URL set but does not look like an http(s) URL: {:?}",
-            raw
-        );
-        None
-    }
-}
-
 /// Find and parse `hook.config.json`, returning:
-/// - the resolved `target_url` plus the path we read it from (for logging), if
-///   any candidate yielded a valid http(s) URL,
+/// - the resolved list of startup URLs (filtered to valid http(s) URLs only,
+///   empty when the field is missing/null/empty or every candidate failed to
+///   parse),
 /// - the resolved `WindowConfig` (defaulted when missing or when no candidate
-///   parsed successfully),
-/// - the resolved list of additional startup windows (filtered to valid
-///   http(s) URLs only, empty when missing or when no candidate parsed
-///   successfully).
+///   parsed successfully).
 ///
 /// Side-effect: when a candidate parses, also installs any `ignore_urls` rules
 /// into the global matcher set (see `hook::ignore_filter::set_matchers`),
 /// atomically replacing whatever was previously installed (so a Reload
 /// re-read picks up additions / removals / edits).
-fn from_config_file() -> (Option<(String, PathBuf)>, WindowConfig, Vec<String>) {
+fn from_config_file() -> (Vec<String>, WindowConfig) {
     let mut window = WindowConfig::default();
-    let mut windows: Vec<String> = Vec::new();
-    let mut target_url: Option<(String, PathBuf)> = None;
+    let mut startup_urls: Vec<String> = Vec::new();
 
     for candidate in candidate_config_paths() {
         match std::fs::read_to_string(&candidate) {
             Ok(text) => match serde_json::from_str::<ConfigFile>(&text) {
                 Ok(parsed) => {
-                    // Install ignore_urls regardless of whether target_url is
-                    // present/valid — these are independent concerns and we
-                    // want filtering active even if target_url falls through
-                    // to env/default.
+                    // Install ignore_urls regardless of whether startup_urls
+                    // is present/non-empty — these are independent concerns
+                    // and we want filtering active even with no windows.
                     if let Some(entries) = parsed.ignore_urls.as_deref() {
                         if !entries.is_empty() {
                             info!(
@@ -227,58 +162,37 @@ fn from_config_file() -> (Option<(String, PathBuf)>, WindowConfig, Vec<String>) 
                         crate::hook::ignore_filter::set_matchers(&[]);
                     }
 
-                    // Window config follows the same "first-hit wins" pattern
-                    // as target_url — we only adopt it from the first candidate
-                    // that successfully parsed.
-                    if target_url.is_none() {
-                        if let Some(w) = parsed.window {
-                            window = w;
-                        }
-                        // `windows` follows the same "first-hit wins" pattern.
-                        // Filter to valid http(s) URLs and log a warn per
-                        // dropped entry so the operator knows why the window
-                        // they configured didn't open.
-                        if let Some(entries) = parsed.windows {
-                            for entry in entries {
-                                if looks_like_url(&entry) {
-                                    windows.push(entry);
-                                } else {
-                                    warn!(
-                                        target: "hook",
-                                        "[config] {} windows entry is not an http(s) URL; skipping: {:?}",
-                                        pretty_path(&candidate).display(),
-                                        entry
-                                    );
-                                }
-                            }
-                            if !windows.is_empty() {
-                                info!(
+                    // First parse-success wins for window / startup_urls —
+                    // matches the old "first hit wins" behaviour when
+                    // multiple candidate paths exist. Adopt + return on
+                    // this candidate so secondary paths don't clobber the
+                    // already-installed values.
+                    if let Some(w) = parsed.window {
+                        window = w;
+                    }
+                    if let Some(entries) = parsed.startup_urls {
+                        for entry in entries {
+                            if looks_like_url(&entry) {
+                                startup_urls.push(entry);
+                            } else {
+                                warn!(
                                     target: "hook",
-                                    "[config] {} windows = {} entrie(s)",
+                                    "[config] {} startup_urls entry is not an http(s) URL; skipping: {:?}",
                                     pretty_path(&candidate).display(),
-                                    windows.len()
+                                    entry
                                 );
                             }
                         }
-                    }
-
-                    match parsed.target_url {
-                        Some(url) if looks_like_url(&url) => {
-                            target_url = Some((url, candidate));
-                            return (target_url, window, windows);
+                        if !startup_urls.is_empty() {
+                            info!(
+                                target: "hook",
+                                "[config] {} startup_urls = {} entrie(s)",
+                                pretty_path(&candidate).display(),
+                                startup_urls.len()
+                            );
                         }
-                        Some(url) => warn!(
-                            target: "hook",
-                            "[config] {} target_url is not an http(s) URL: {:?}",
-                            pretty_path(&candidate).display(),
-                            url
-                        ),
-                        None => warn!(
-                            target: "hook",
-                            "[config] {} has no target_url field",
-                            pretty_path(&candidate).display()
-                        ),
                     }
+                    return (startup_urls, window);
                 }
                 Err(e) => warn!(
                     target: "hook",
@@ -298,7 +212,7 @@ fn from_config_file() -> (Option<(String, PathBuf)>, WindowConfig, Vec<String>) 
             ),
         }
     }
-    (target_url, window, windows)
+    (startup_urls, window)
 }
 
 /// All locations we will try, in priority order.
@@ -340,16 +254,21 @@ mod tests {
     }
 
     #[test]
-    fn config_file_parses_target_url() {
-        let parsed: ConfigFile =
-            serde_json::from_str(r#"{"target_url": "https://example.com/"}"#).unwrap();
-        assert_eq!(parsed.target_url.as_deref(), Some("https://example.com/"));
+    fn config_file_parses_startup_urls() {
+        let parsed: ConfigFile = serde_json::from_str(
+            r#"{"startup_urls": ["https://a.example/", "http://b.example/"]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            parsed.startup_urls.as_deref(),
+            Some(&["https://a.example/".to_string(), "http://b.example/".to_string()][..])
+        );
     }
 
     #[test]
-    fn config_file_tolerates_missing_field() {
+    fn config_file_tolerates_missing_startup_urls() {
         let parsed: ConfigFile = serde_json::from_str("{}").unwrap();
-        assert!(parsed.target_url.is_none());
+        assert!(parsed.startup_urls.is_none());
     }
 
     #[test]
@@ -397,23 +316,5 @@ mod tests {
             WindowConfig::default(),
             WindowConfig::Mode(WindowMode::Screen)
         ));
-    }
-
-    #[test]
-    fn config_file_windows_field_parses() {
-        let parsed: ConfigFile = serde_json::from_str(
-            r#"{"windows": ["https://a.example/", "http://b.example/"]}"#,
-        )
-        .unwrap();
-        assert_eq!(
-            parsed.windows.as_deref(),
-            Some(&["https://a.example/".to_string(), "http://b.example/".to_string()][..])
-        );
-    }
-
-    #[test]
-    fn config_file_windows_missing_is_none() {
-        let parsed: ConfigFile = serde_json::from_str("{}").unwrap();
-        assert!(parsed.windows.is_none());
     }
 }

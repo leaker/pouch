@@ -72,10 +72,10 @@ const COMBOBOX_VISIBLE_ITEMS: isize = 8;
 const ALERT_ICON_SYMBOL: &str = "globe";
 
 /// Process-wide counter producing unique `WebviewWindow` labels for windows
-/// created at runtime (the New Window dialog, plus the startup `windows`
-/// config-file array — both go through this counter so labels never
-/// collide). The main window is always `"main"`; everything else is
-/// `"window-2"`, `"window-3"`, ... in creation order.
+/// created at runtime (the New Window dialog, plus the startup `startup_urls`
+/// tail entries — both go through this counter so labels never collide).
+/// The main window is always `"main"`; everything else is `"window-2"`,
+/// `"window-3"`, ... in creation order.
 ///
 /// Starts at 2 so the first dynamically-created window is `"window-2"` (the
 /// "1" slot conceptually belongs to the main window — keeps the numbering
@@ -83,7 +83,7 @@ const ALERT_ICON_SYMBOL: &str = "globe";
 static NEXT_LABEL: AtomicUsize = AtomicUsize::new(2);
 
 /// Allocate the next unique window label. Called by both the startup
-/// `windows` array iteration in `lib.rs::setup` and the New Window menu
+/// `startup_urls` tail iteration in `lib.rs::run` and the New Window menu
 /// handler so neither path can hand out a duplicate label (Tauri rejects
 /// duplicate labels in `WebviewWindowBuilder::build`).
 pub fn next_window_label() -> String {
@@ -95,10 +95,10 @@ thread_local! {
     /// Snapshot of `Config.window` cached at startup so the Cmd+N New Window
     /// handler — which has only an `&AppHandle` and no access to the original
     /// `Config` — can apply the same `WindowConfig` mode that the main window
-    /// (and the startup `windows` array) used. We use a `thread_local` because
-    /// both `cache_window_config` (called from `lib.rs::setup`) and
-    /// `current_window_config` (called from the menu handler / `NSAlert`
-    /// callback path) run on the AppKit main thread.
+    /// (and any extra windows from the startup `startup_urls` tail) used.
+    /// We use a `thread_local` because both `cache_window_config` (called
+    /// from `lib.rs::run`) and `current_window_config` (called from the menu
+    /// handler / `NSAlert` callback path) run on the AppKit main thread.
     static CACHED_WINDOW_CONFIG: OnceCell<WindowConfig> = const { OnceCell::new() };
 }
 
@@ -133,7 +133,7 @@ fn current_window_config() -> WindowConfig {
 ///   shouldn't happen given [`next_window_label`]) → warn log, no window.
 #[cfg(target_os = "macos")]
 pub fn show_new_window_dialog(app: &AppHandle) {
-    let raw = match prompt_url_via_alert() {
+    let raw = match prompt_url_for_new_window() {
         Some(s) => s,
         None => return, // user cancelled
     };
@@ -184,17 +184,46 @@ pub fn show_new_window_dialog(app: &AppHandle) {
     }
 }
 
+/// Cmd+N "New Window" entry point — runs the modal `NSAlert` titled "New
+/// Window" and returns the user-typed (or selected-from-history) URL. See
+/// [`prompt_url_via_alert`] for the shared dialog implementation and
+/// failure-mode contract.
+#[cfg(target_os = "macos")]
+fn prompt_url_for_new_window() -> Option<String> {
+    prompt_url_via_alert("New Window", "Enter a URL (http or https):")
+}
+
+/// First-launch entry point — used by `lib.rs::run` when the resolved
+/// `startup_urls` list is empty (config file missing / field omitted / every
+/// entry was non-http(s)). Wraps the same shared `NSAlert` implementation
+/// with a "Welcome to Pouch" framing so the user understands this is the
+/// initial bootstrap rather than a regular New-Window prompt. On Cancel /
+/// Escape `lib.rs::run` calls `std::process::exit(0)` rather than spawning
+/// any window — see the matching arm in `lib.rs`.
+#[cfg(target_os = "macos")]
+pub fn prompt_initial_url() -> Option<String> {
+    prompt_url_via_alert("Welcome to Pouch", "Enter a URL to open:")
+}
+
 /// Run the modal `NSAlert` and return the contents of its accessory
 /// `NSComboBox` on OK, or `None` on Cancel / non-main-thread / a failed
 /// `MainThreadMarker::new` (the menu handler always runs on the main thread,
 /// so the latter never fires in practice).
+///
+/// `title` becomes the alert's `messageText` (bold heading) and `info`
+/// becomes its `informativeText` (smaller body). Parameterising both lets a
+/// single AppKit implementation back both the regular Cmd+N "New Window"
+/// prompt and the first-launch "Welcome to Pouch" prompt without duplicating
+/// the `NSComboBox` / icon / button wiring below.
 #[cfg(target_os = "macos")]
-fn prompt_url_via_alert() -> Option<String> {
+fn prompt_url_via_alert(title: &str, info: &str) -> Option<String> {
     let mtm = MainThreadMarker::new()?;
+    let title_ns = NSString::from_str(title);
+    let info_ns = NSString::from_str(info);
     unsafe {
         let alert = NSAlert::new(mtm);
-        alert.setMessageText(ns_string!("New Window"));
-        alert.setInformativeText(ns_string!("Enter a URL (http or https):"));
+        alert.setMessageText(&title_ns);
+        alert.setInformativeText(&info_ns);
 
         // Replace the default app-bundle icon (loud blue Pouch folder
         // badge) with a neutral SF Symbol that reads as "go to a web
@@ -271,7 +300,7 @@ fn prompt_url_via_alert() -> Option<String> {
 }
 
 /// Build a `WebviewWindow` for an extra URL. Shared by the startup
-/// `windows`-config path (`lib.rs::setup`) and the New Window dialog so
+/// `startup_urls`-config tail path (`lib.rs::run`) and the New Window dialog so
 /// both go through the same defaults: devtools enabled, native title-sync,
 /// no fixed title (lets upstream `<title>` win on first paint), and the
 /// shared `DEFAULT_WINDOW_{WIDTH,HEIGHT}` baseline so extra windows match
@@ -279,10 +308,11 @@ fn prompt_url_via_alert() -> Option<String> {
 /// 800x600 platform default — see [`crate::util::DEFAULT_WINDOW_WIDTH`].
 ///
 /// `window_config` carries the same `WindowConfig` the main window uses so
-/// extra windows (whether spawned from the startup `windows` array or via
-/// Cmd+N) honour `hook.config.json -> window` (Screen / Fullscreen / Size)
-/// identically to the main window — the maximize / fullscreen / fixed-size
-/// match below mirrors `lib.rs::setup` exactly.
+/// extra windows (whether spawned from the startup `startup_urls` tail or
+/// via Cmd+N) honour `hook.config.json -> window` (Screen / Fullscreen /
+/// Size) identically to the main window — the maximize / fullscreen /
+/// fixed-size match below mirrors `create_main_window_with_url` in `lib.rs`
+/// exactly.
 ///
 /// Cookies / storage are shared with the main window — Tauri v2's default
 /// is one shared `WKWebViewConfiguration` / `ICoreWebView2Environment` per
