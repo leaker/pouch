@@ -42,10 +42,10 @@ pub struct Config {
     /// startup path then prompts the user via `NSAlert`.
     #[serde(default)]
     pub startup_urls: Vec<String>,
-    /// Resolved window-size mode (never `Option` — defaults to
-    /// [`WindowConfig::default`] when missing from the JSON).
+    /// Resolved window dimensions (never `Option` — defaults to
+    /// [`WindowDimensions::default`] when missing from the JSON).
     #[serde(default)]
-    pub window: WindowConfig,
+    pub window_dimensions: WindowDimensions,
 }
 
 /// On-disk schema for `hook.config.json`. Kept separate from `Config` so
@@ -59,9 +59,9 @@ struct ConfigFile {
     /// NSAlert at startup" — see `lib.rs::run`.
     #[serde(default)]
     startup_urls: Option<Vec<String>>,
-    /// Optional window-size config. Missing → [`WindowConfig::default`].
+    /// Optional window dimensions. Missing → [`WindowDimensions::default`].
     #[serde(default)]
-    window: Option<WindowConfig>,
+    window_dimensions: Option<WindowDimensions>,
     /// Optional ignoreUrls list — see `hook/ignore_filter.rs` for the
     /// per-entry pattern syntax. Compiled into the global matcher set at
     /// startup; missing/null/empty all mean "no filtering".
@@ -69,18 +69,22 @@ struct ConfigFile {
     ignore_urls: Option<Vec<IgnoreEntry>>,
 }
 
-/// Initial window-size mode.
+/// Initial window dimensions. VSCode-style naming: the string variants mirror
+/// VSCode's `window.newWindowDimensions` semantics for clarity.
 ///
 /// JSON shapes:
-/// - `"screen"`     → fill the work area (excludes macOS menubar/dock or
+/// - `"default"`    → ordinary floating window at the
+///   `DEFAULT_WINDOW_{WIDTH,HEIGHT}` (1280x960) baseline; not maximised, not
+///   fullscreen.
+/// - `"maximized"`  → fill the work area (excludes macOS menubar/dock or
 ///   Windows taskbar). Default when the field is omitted.
 /// - `"fullscreen"` → real fullscreen, hides window chrome.
 /// - `{ "width": 1280, "height": 800 }` → fixed logical pixel size.
 #[derive(Debug, Deserialize, Serialize, Clone, Copy)]
 #[serde(untagged)]
-pub enum WindowConfig {
-    /// String mode: `"screen"` | `"fullscreen"`.
-    Mode(WindowMode),
+pub enum WindowDimensions {
+    /// String mode: `"default"` | `"maximized"` | `"fullscreen"`.
+    Mode(WindowDimensionsMode),
     /// Pixel size: `{ "width": <px>, "height": <px> }`. `u32` deserialisation
     /// already rejects negatives; zero values fall back to default at apply
     /// time (see `lib.rs`).
@@ -89,14 +93,15 @@ pub enum WindowConfig {
 
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-pub enum WindowMode {
-    Screen,
+pub enum WindowDimensionsMode {
+    Default,
+    Maximized,
     Fullscreen,
 }
 
-impl Default for WindowConfig {
+impl Default for WindowDimensions {
     fn default() -> Self {
-        Self::Mode(WindowMode::Screen)
+        Self::Mode(WindowDimensionsMode::Maximized)
     }
 }
 
@@ -111,10 +116,10 @@ impl Default for WindowConfig {
 /// Reload path simply re-invokes [`load`] to pick up edits to
 /// `hook.config.json` without restarting.
 pub fn load() -> Config {
-    let (startup_urls, window) = from_config_file();
+    let (startup_urls, window_dimensions) = from_config_file();
     Config {
         startup_urls,
-        window,
+        window_dimensions,
     }
 }
 
@@ -126,15 +131,15 @@ fn looks_like_url(s: &str) -> bool {
 /// - the resolved list of startup URLs (filtered to valid http(s) URLs only,
 ///   empty when the field is missing/null/empty or every candidate failed to
 ///   parse),
-/// - the resolved `WindowConfig` (defaulted when missing or when no candidate
-///   parsed successfully).
+/// - the resolved `WindowDimensions` (defaulted when missing or when no
+///   candidate parsed successfully).
 ///
 /// Side-effect: when a candidate parses, also installs any `ignore_urls` rules
 /// into the global matcher set (see `hook::ignore_filter::set_matchers`),
 /// atomically replacing whatever was previously installed (so a Reload
 /// re-read picks up additions / removals / edits).
-fn from_config_file() -> (Vec<String>, WindowConfig) {
-    let mut window = WindowConfig::default();
+fn from_config_file() -> (Vec<String>, WindowDimensions) {
+    let mut window_dimensions = WindowDimensions::default();
     let mut startup_urls: Vec<String> = Vec::new();
 
     for candidate in candidate_config_paths() {
@@ -162,13 +167,13 @@ fn from_config_file() -> (Vec<String>, WindowConfig) {
                         crate::hook::ignore_filter::set_matchers(&[]);
                     }
 
-                    // First parse-success wins for window / startup_urls —
-                    // matches the old "first hit wins" behaviour when
-                    // multiple candidate paths exist. Adopt + return on
-                    // this candidate so secondary paths don't clobber the
-                    // already-installed values.
-                    if let Some(w) = parsed.window {
-                        window = w;
+                    // First parse-success wins for window_dimensions /
+                    // startup_urls — matches the old "first hit wins"
+                    // behaviour when multiple candidate paths exist. Adopt
+                    // + return on this candidate so secondary paths don't
+                    // clobber the already-installed values.
+                    if let Some(w) = parsed.window_dimensions {
+                        window_dimensions = w;
                     }
                     if let Some(entries) = parsed.startup_urls {
                         for entry in entries {
@@ -192,7 +197,7 @@ fn from_config_file() -> (Vec<String>, WindowConfig) {
                             );
                         }
                     }
-                    return (startup_urls, window);
+                    return (startup_urls, window_dimensions);
                 }
                 Err(e) => warn!(
                     target: "hook",
@@ -212,7 +217,7 @@ fn from_config_file() -> (Vec<String>, WindowConfig) {
             ),
         }
     }
-    (startup_urls, window)
+    (startup_urls, window_dimensions)
 }
 
 /// All locations we will try, in priority order.
@@ -272,23 +277,38 @@ mod tests {
     }
 
     #[test]
-    fn window_config_screen_string() {
-        let parsed: WindowConfig = serde_json::from_str(r#""screen""#).unwrap();
-        assert!(matches!(parsed, WindowConfig::Mode(WindowMode::Screen)));
+    fn window_dimensions_default_string() {
+        let parsed: WindowDimensions = serde_json::from_str(r#""default""#).unwrap();
+        assert!(matches!(
+            parsed,
+            WindowDimensions::Mode(WindowDimensionsMode::Default)
+        ));
     }
 
     #[test]
-    fn window_config_fullscreen_string() {
-        let parsed: WindowConfig = serde_json::from_str(r#""fullscreen""#).unwrap();
-        assert!(matches!(parsed, WindowConfig::Mode(WindowMode::Fullscreen)));
+    fn window_dimensions_maximized_string() {
+        let parsed: WindowDimensions = serde_json::from_str(r#""maximized""#).unwrap();
+        assert!(matches!(
+            parsed,
+            WindowDimensions::Mode(WindowDimensionsMode::Maximized)
+        ));
     }
 
     #[test]
-    fn window_config_size_object() {
-        let parsed: WindowConfig =
+    fn window_dimensions_fullscreen_string() {
+        let parsed: WindowDimensions = serde_json::from_str(r#""fullscreen""#).unwrap();
+        assert!(matches!(
+            parsed,
+            WindowDimensions::Mode(WindowDimensionsMode::Fullscreen)
+        ));
+    }
+
+    #[test]
+    fn window_dimensions_size_object() {
+        let parsed: WindowDimensions =
             serde_json::from_str(r#"{"width": 1280, "height": 800}"#).unwrap();
         match parsed {
-            WindowConfig::Size { width, height } => {
+            WindowDimensions::Size { width, height } => {
                 assert_eq!(width, 1280);
                 assert_eq!(height, 800);
             }
@@ -297,24 +317,27 @@ mod tests {
     }
 
     #[test]
-    fn window_config_rejects_uppercase_mode() {
-        // serde rename_all = "lowercase" + untagged enum: "Screen" matches no
-        // variant, so the whole untagged enum fails to deserialise.
-        assert!(serde_json::from_str::<WindowConfig>(r#""Screen""#).is_err());
-        assert!(serde_json::from_str::<WindowConfig>(r#""FULLSCREEN""#).is_err());
-        assert!(serde_json::from_str::<WindowConfig>(r#""max""#).is_err());
+    fn window_dimensions_rejects_uppercase_mode() {
+        // serde rename_all = "lowercase" + untagged enum: "Maximized" matches
+        // no variant, so the whole untagged enum fails to deserialise.
+        assert!(serde_json::from_str::<WindowDimensions>(r#""Maximized""#).is_err());
+        assert!(serde_json::from_str::<WindowDimensions>(r#""FULLSCREEN""#).is_err());
+        assert!(serde_json::from_str::<WindowDimensions>(r#""max""#).is_err());
+        // The legacy v1.0.x value `"screen"` is a hard schema break (no alias).
+        assert!(serde_json::from_str::<WindowDimensions>(r#""screen""#).is_err());
     }
 
     #[test]
-    fn config_file_window_defaults_when_missing() {
+    fn config_file_window_dimensions_defaults_when_missing() {
         let parsed: ConfigFile = serde_json::from_str("{}").unwrap();
-        assert!(parsed.window.is_none());
-        // The resolved Config (via the load() path) defaults to Screen — we
-        // can't easily call load() here because it touches argv/env/fs, but we
-        // can confirm the WindowConfig::default() contract directly.
+        assert!(parsed.window_dimensions.is_none());
+        // The resolved Config (via the load() path) defaults to Maximized —
+        // we can't easily call load() here because it touches argv/env/fs,
+        // but we can confirm the WindowDimensions::default() contract
+        // directly.
         assert!(matches!(
-            WindowConfig::default(),
-            WindowConfig::Mode(WindowMode::Screen)
+            WindowDimensions::default(),
+            WindowDimensions::Mode(WindowDimensionsMode::Maximized)
         ));
     }
 }

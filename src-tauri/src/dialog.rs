@@ -26,7 +26,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
-use crate::config::{WindowConfig, WindowMode};
+use crate::config::{WindowDimensions, WindowDimensionsMode};
 use crate::util::{DEFAULT_WINDOW_HEIGHT, DEFAULT_WINDOW_WIDTH};
 
 #[cfg(target_os = "macos")]
@@ -92,34 +92,36 @@ pub fn next_window_label() -> String {
 }
 
 thread_local! {
-    /// Snapshot of `Config.window` cached at startup so the Cmd+N New Window
-    /// handler — which has only an `&AppHandle` and no access to the original
-    /// `Config` — can apply the same `WindowConfig` mode that the main window
-    /// (and any extra windows from the startup `startup_urls` tail) used.
-    /// We use a `thread_local` because both `cache_window_config` (called
-    /// from `lib.rs::run`) and `current_window_config` (called from the menu
-    /// handler / `NSAlert` callback path) run on the AppKit main thread.
-    static CACHED_WINDOW_CONFIG: OnceCell<WindowConfig> = const { OnceCell::new() };
+    /// Snapshot of `Config.window_dimensions` cached at startup so the Cmd+N
+    /// New Window handler — which has only an `&AppHandle` and no access to
+    /// the original `Config` — can apply the same `WindowDimensions` mode
+    /// that the main window (and any extra windows from the startup
+    /// `startup_urls` tail) used. We use a `thread_local` because both
+    /// `cache_window_dimensions` (called from `lib.rs::run`) and
+    /// `current_window_dimensions` (called from the menu handler / `NSAlert`
+    /// callback path) run on the AppKit main thread.
+    static CACHED_WINDOW_DIMENSIONS: OnceCell<WindowDimensions> = const { OnceCell::new() };
 }
 
-/// Cache the resolved `WindowConfig` once at startup. Called from
-/// `lib.rs::setup` exactly once with `cfg.window`. Subsequent `set` calls are
-/// silently ignored (`OnceCell::set` semantics) — there is currently no path
-/// that re-issues this; reload is implemented as a full process restart so
-/// the cached value is reset alongside everything else.
-pub fn cache_window_config(window_config: WindowConfig) {
-    CACHED_WINDOW_CONFIG.with(|c| {
-        let _ = c.set(window_config);
+/// Cache the resolved `WindowDimensions` once at startup. Called from
+/// `lib.rs::setup` exactly once with `cfg.window_dimensions`. Subsequent
+/// `set` calls are silently ignored (`OnceCell::set` semantics) — there is
+/// currently no path that re-issues this; reload is implemented as a full
+/// process restart so the cached value is reset alongside everything else.
+pub fn cache_window_dimensions(window_dimensions: WindowDimensions) {
+    CACHED_WINDOW_DIMENSIONS.with(|c| {
+        let _ = c.set(window_dimensions);
     });
 }
 
-/// Read the cached `WindowConfig`, falling back to `WindowConfig::default()`
-/// (`Mode(Screen)`) if `cache_window_config` was never called — defensive
-/// against a future refactor that drops the setup-time cache call; the
-/// fallback matches what the JSON loader picks for a missing `window` field
-/// in `hook.config.json`.
-fn current_window_config() -> WindowConfig {
-    CACHED_WINDOW_CONFIG.with(|c| c.get().copied().unwrap_or_default())
+/// Read the cached `WindowDimensions`, falling back to
+/// `WindowDimensions::default()` (`Mode(Maximized)`) if
+/// `cache_window_dimensions` was never called — defensive against a future
+/// refactor that drops the setup-time cache call; the fallback matches what
+/// the JSON loader picks for a missing `window_dimensions` field in
+/// `hook.config.json`.
+fn current_window_dimensions() -> WindowDimensions {
+    CACHED_WINDOW_DIMENSIONS.with(|c| c.get().copied().unwrap_or_default())
 }
 
 /// Prompt the user for a URL and, on OK with a valid http(s) URL, open it
@@ -163,8 +165,8 @@ pub fn show_new_window_dialog(app: &AppHandle) {
     }
 
     let label = next_window_label();
-    let window_config = current_window_config();
-    match open_extra_window(app, &label, url, window_config) {
+    let window_dimensions = current_window_dimensions();
+    match open_extra_window(app, &label, url, window_dimensions) {
         Ok(_) => {
             // Only record on success: a failed `build()` (e.g. label
             // collision, which shouldn't happen given `next_window_label`)
@@ -307,12 +309,12 @@ fn prompt_url_via_alert(title: &str, info: &str) -> Option<String> {
 /// the main window's default sizing instead of falling through to wry's
 /// 800x600 platform default — see [`crate::util::DEFAULT_WINDOW_WIDTH`].
 ///
-/// `window_config` carries the same `WindowConfig` the main window uses so
-/// extra windows (whether spawned from the startup `startup_urls` tail or
-/// via Cmd+N) honour `hook.config.json -> window` (Screen / Fullscreen /
-/// Size) identically to the main window — the maximize / fullscreen /
-/// fixed-size match below mirrors `create_main_window_with_url` in `lib.rs`
-/// exactly.
+/// `window_dimensions` carries the same `WindowDimensions` the main window
+/// uses so extra windows (whether spawned from the startup `startup_urls`
+/// tail or via Cmd+N) honour `hook.config.json -> window_dimensions`
+/// (Default / Maximized / Fullscreen / Size) identically to the main window
+/// — the maximize / fullscreen / fixed-size match below mirrors
+/// `create_main_window_with_url` in `lib.rs` exactly.
 ///
 /// Cookies / storage are shared with the main window — Tauri v2's default
 /// is one shared `WKWebViewConfiguration` / `ICoreWebView2Environment` per
@@ -322,7 +324,7 @@ pub fn open_extra_window(
     app: &AppHandle,
     label: &str,
     url: url::Url,
-    window_config: WindowConfig,
+    window_dimensions: WindowDimensions,
 ) -> tauri::Result<tauri::WebviewWindow> {
     let url_for_log = url.to_string();
     let mut builder = WebviewWindowBuilder::new(app, label, WebviewUrl::External(url))
@@ -356,23 +358,27 @@ pub fn open_extra_window(
     // deterministic (never inheriting wry leftover state) and `inner_size`
     // is set on every branch so an un-maximize / un-fullscreen gesture
     // restores to a sensible 1280x960 instead of wry's 800x600 default.
-    builder = match window_config {
-        WindowConfig::Mode(WindowMode::Screen) => builder
+    builder = match window_dimensions {
+        WindowDimensions::Mode(WindowDimensionsMode::Default) => builder
+            .fullscreen(false)
+            .maximized(false)
+            .inner_size(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT),
+        WindowDimensions::Mode(WindowDimensionsMode::Maximized) => builder
             .fullscreen(false)
             .maximized(true)
             .inner_size(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT),
-        WindowConfig::Mode(WindowMode::Fullscreen) => builder
+        WindowDimensions::Mode(WindowDimensionsMode::Fullscreen) => builder
             .fullscreen(true)
             .maximized(false)
             .inner_size(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT),
-        WindowConfig::Size { width, height } if width > 0 && height > 0 => builder
+        WindowDimensions::Size { width, height } if width > 0 && height > 0 => builder
             .fullscreen(false)
             .maximized(false)
             .inner_size(f64::from(width), f64::from(height)),
-        WindowConfig::Size { width, height } => {
+        WindowDimensions::Size { width, height } => {
             tracing::warn!(
                 target: "hook",
-                "[extra-window] window size {{ width: {}, height: {} }} has a zero dimension; falling back to default (screen)",
+                "[extra-window] window size {{ width: {}, height: {} }} has a zero dimension; falling back to default (maximized)",
                 width,
                 height
             );

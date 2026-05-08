@@ -278,7 +278,7 @@ The shipped [`hook.config.json`](hook.config.json) sets `startup_urls` plus a st
   "startup_urls": [
     "https://www.leelib.com"
   ],
-  "window": "screen",
+  "window_dimensions": "maximized",
   "ignore_urls": [
     { "suffix": "gstatic.com",          "comment": "Google static asset CDN (apex + all subdomains)" },
     { "suffix": "googletagmanager.com", "comment": "GTM / GA injection scripts" },
@@ -296,7 +296,7 @@ Fields:
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `startup_urls` | array of strings (each `http://` or `https://`) | No (missing/`null`/`[]` = prompt the user via NSAlert at startup; Cancel exits — see §2.6 / §4.2) | URLs to open at launch. The first valid entry becomes the main `WebviewWindow` (`label = "main"`, `WebviewUrl::External(url)`); every subsequent entry opens as its own extra window with shared cookies / cache and an independent webview lifecycle. Non-http(s) entries are dropped with a `warn` log. See §2.6. |
-| `window` | `"screen"` \| `"fullscreen"` \| `{ "width": <px>, "height": <px> }` | No (default `"screen"`) | Initial window-size mode applied at launch (uniformly to the main window and every extra window). See §4.4. |
+| `window_dimensions` | `"default"` \| `"maximized"` \| `"fullscreen"` \| `{ "width": <px>, "height": <px> }` | No (default `"maximized"`) | Initial window dimensions applied at launch (uniformly to the main window and every extra window). VSCode-style naming. See §4.4. |
 | `ignore_urls` | array of entries (one of `suffix` / `wildcard` / `url_wildcard` / `url_regex`, plus optional `comment`) | No (missing/`null`/`[]` = no filtering) | Per-entry blacklist; matched URLs are fetched but never cached. See §4.3 for the four entry shapes. |
 
 > **Schema break in v1.1**: the previous fields `target_url` (single string) and `windows` (array) have been **unified into the single `startup_urls` array**. There is no deprecation alias — users upgrading from v1.0.x must edit `hook.config.json` by hand. The `TAURI_HOOK_TARGET_URL` environment variable and the `argv[1]` URL override have also been removed in the same change (everything goes through `startup_urls` now).
@@ -352,37 +352,44 @@ Host comparisons parse the URL via the `url` crate, so scheme / port / path / IP
 
 > **NSURLProtocol constraint behind "fetch but no write"**: see the module docs in [`policy.rs`](src-tauri/src/hook/policy.rs). Once macOS `-startLoading` has been called, the subclass **must** produce a response — there is no NSURLProtocol API to "let go mid-load and fall back to the default loader" — so even on an ignore-list hit we still fetch the body via reqwest and hand it back. The Windows path follows the same semantics so the policy layer can be shared.
 
-### 4.4 `window` (size mode)
+### 4.4 `window_dimensions`
 
 Source: [`src-tauri/src/config.rs`](src-tauri/src/config.rs) (schema), [`src-tauri/src/lib.rs`](src-tauri/src/lib.rs) (apply)
 
-Controls the initial window dimensions. Three shapes are accepted:
+Controls the initial window dimensions. VSCode-style naming for clarity — the string variants mirror VSCode's `window.newWindowDimensions` semantics. Four shapes are accepted:
 
 | Value | Behaviour |
 |---|---|
-| `"screen"` (**default**) | Fills the work area — excludes the macOS menubar / dock and the Windows taskbar. Implemented via Tauri's `WebviewWindowBuilder::maximized(true)`, which the underlying wry layer forwards to `NSWindow.zoom:` on macOS and `ShowWindow(SW_MAXIMIZE)` on Windows so the OS work area is honoured natively. |
+| `"default"` | Ordinary floating window at the `DEFAULT_WINDOW_{WIDTH,HEIGHT}` (1280x960) baseline; not maximised, not fullscreen. Useful when the user wants to position / resize the window manually. |
+| `"maximized"` (**default**) | Fills the work area — excludes the macOS menubar / dock and the Windows taskbar. Implemented via Tauri's `WebviewWindowBuilder::maximized(true)`, which the underlying wry layer forwards to `NSWindow.zoom:` on macOS and `ShowWindow(SW_MAXIMIZE)` on Windows so the OS work area is honoured natively. |
 | `"fullscreen"` | Real fullscreen via `WebviewWindowBuilder::fullscreen(true)` — hides window chrome (title bar, traffic lights, taskbar). |
 | `{ "width": <px>, "height": <px> }` | Fixed logical-pixel inner size via `WebviewWindowBuilder::inner_size(width, height)`. Logical pixels are DPR-independent (a `1280` here is the same physical width on a Retina display as on a non-Retina one). |
 
 Examples:
 
 ```json
-"window": "screen"
+"window_dimensions": "default"
 ```
 
 ```json
-"window": "fullscreen"
+"window_dimensions": "maximized"
 ```
 
 ```json
-"window": { "width": 1280, "height": 800 }
+"window_dimensions": "fullscreen"
+```
+
+```json
+"window_dimensions": { "width": 1280, "height": 800 }
 ```
 
 Validation:
 
-- Unknown string values (e.g. `"Screen"`, `"FULLSCREEN"`, `"max"`) fail JSON parsing for the whole config file (serde `rename_all = "lowercase"`); the loader then warns and falls through, so the resolved `window` defaults to `"screen"`.
+- Unknown string values (e.g. `"Maximized"`, `"FULLSCREEN"`, `"max"`, the legacy v1.0.x value `"screen"`) fail JSON parsing for the whole config file (serde `rename_all = "lowercase"`); the loader then warns and falls through, so the resolved `window_dimensions` defaults to `"maximized"`.
 - Negative `width` / `height` fail at the `u32` deserialisation step (same fall-through behaviour).
-- Zero `width` or `height` is accepted by `u32` but logged as a `warn` at startup and falls back to `"screen"` mode.
+- Zero `width` or `height` is accepted by `u32` but logged as a `warn` at startup and falls back to `"maximized"` mode.
+
+> **Schema break from v1.0.x**: the previous `window` field has been renamed to `window_dimensions` and the value `"screen"` has been renamed to `"maximized"`. There is no deprecation alias — users upgrading from v1.0.x must edit `hook.config.json` by hand.
 
 ### 4.5 Logging
 
@@ -621,7 +628,7 @@ For context, here is how Pouch differs in detail from a CDP-driven interception 
 pouch/
 ├── README.md              # this document
 ├── LICENSE                # MIT
-├── hook.config.json       # user config: startup_urls + window + ignore_urls
+├── hook.config.json       # user config: startup_urls + window_dimensions + ignore_urls
 ├── package.json           # only one devDep: @tauri-apps/cli
 ├── bun.lock
 ├── inject/                # user-script directory (see §6)

@@ -46,7 +46,7 @@ use tauri::{
     AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
 };
 
-use crate::config::{WindowConfig, WindowMode};
+use crate::config::{WindowDimensions, WindowDimensionsMode};
 use crate::util::{DEFAULT_WINDOW_HEIGHT, DEFAULT_WINDOW_WIDTH};
 use tracing_subscriber::{fmt::time::ChronoLocal, EnvFilter};
 
@@ -326,13 +326,13 @@ pub fn run() {
                 cache_store::cache_root().display()
             );
 
-            // Cache the resolved window mode so the Cmd+N "New Window"
+            // Cache the resolved window dimensions so the Cmd+N "New Window"
             // handler — which only has `&AppHandle`, not the original
-            // `Config` — applies the same maximize / fullscreen / fixed-size
-            // mode to runtime-spawned extra windows that the main window
-            // and the startup_urls array use. See
-            // `dialog::cache_window_config` for the storage rationale.
-            dialog::cache_window_config(cfg.window);
+            // `Config` — applies the same default / maximized / fullscreen /
+            // fixed-size mode to runtime-spawned extra windows that the main
+            // window and the startup_urls array use. See
+            // `dialog::cache_window_dimensions` for the storage rationale.
+            dialog::cache_window_dimensions(cfg.window_dimensions);
 
             // 1b. Pre-webview platform setup (macOS NSURLProtocol +
             //    WKBrowsingContextController; no-op on Windows).
@@ -403,7 +403,7 @@ pub fn run() {
                     );
                     std::process::exit(0);
                 }
-                create_main_window_with_url(app, url, cfg.window, dispatcher.as_deref())?;
+                create_main_window_with_url(app, url, cfg.window_dimensions, dispatcher.as_deref())?;
             } else {
                 for (i, url_str) in cfg.startup_urls.iter().enumerate() {
                     // We pre-validated http(s) prefix at config load time,
@@ -422,11 +422,11 @@ pub fn run() {
                         }
                     };
                     if i == 0 {
-                        create_main_window_with_url(app, url, cfg.window, dispatcher.as_deref())?;
+                        create_main_window_with_url(app, url, cfg.window_dimensions, dispatcher.as_deref())?;
                     } else {
                         let label = dialog::next_window_label();
                         if let Err(e) =
-                            dialog::open_extra_window(app.handle(), &label, url, cfg.window)
+                            dialog::open_extra_window(app.handle(), &label, url, cfg.window_dimensions)
                         {
                             tracing::warn!(
                                 target: "hook",
@@ -479,7 +479,7 @@ pub fn run() {
                         );
                         std::process::exit(0);
                     }
-                    create_main_window_with_url(app, url, cfg.window, dispatcher.as_deref())?;
+                    create_main_window_with_url(app, url, cfg.window_dimensions, dispatcher.as_deref())?;
                 }
             }
 
@@ -547,7 +547,7 @@ pub fn run() {
 fn create_main_window_with_url(
     app: &tauri::App,
     url: url::Url,
-    window_config: WindowConfig,
+    window_dimensions: WindowDimensions,
     dispatcher: Option<&str>,
 ) -> tauri::Result<WebviewWindow> {
     let url_for_log = url.to_string();
@@ -589,7 +589,7 @@ fn create_main_window_with_url(
         })
         .on_page_load(page_load_handler());
 
-    // Apply the user-configured window-size mode. We always set
+    // Apply the user-configured window dimensions. We always set
     // `fullscreen` and `maximized` explicitly (defaulting to false)
     // so mode switches in `hook.config.json` are deterministic
     // across launches — never depending on a previous build's
@@ -607,23 +607,27 @@ fn create_main_window_with_url(
     // explicit size) so the un-maximize / un-fullscreen gesture
     // restores the window to a sensible 1280x960 instead of wry's
     // 800x600 platform default.
-    builder = match window_config {
-        WindowConfig::Mode(WindowMode::Screen) => builder
+    builder = match window_dimensions {
+        WindowDimensions::Mode(WindowDimensionsMode::Default) => builder
+            .fullscreen(false)
+            .maximized(false)
+            .inner_size(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT),
+        WindowDimensions::Mode(WindowDimensionsMode::Maximized) => builder
             .fullscreen(false)
             .maximized(true)
             .inner_size(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT),
-        WindowConfig::Mode(WindowMode::Fullscreen) => builder
+        WindowDimensions::Mode(WindowDimensionsMode::Fullscreen) => builder
             .fullscreen(true)
             .maximized(false)
             .inner_size(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT),
-        WindowConfig::Size { width, height } if width > 0 && height > 0 => builder
+        WindowDimensions::Size { width, height } if width > 0 && height > 0 => builder
             .fullscreen(false)
             .maximized(false)
             .inner_size(f64::from(width), f64::from(height)),
-        WindowConfig::Size { width, height } => {
+        WindowDimensions::Size { width, height } => {
             tracing::warn!(
                 target: "hook",
-                "[main-window] window size {{ width: {}, height: {} }} has a zero dimension; falling back to default (screen)",
+                "[main-window] window size {{ width: {}, height: {} }} has a zero dimension; falling back to default (maximized)",
                 width,
                 height
             );
