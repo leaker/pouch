@@ -17,6 +17,11 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "resources": {
+      "../hook.config.json": "sample/hook.config.json",
+      "../inject/global.js": "sample/inject/global.js",
+      "../inject/leelib.js": "sample/inject/leelib.js"
+    },
     "android": {
       "debugApplicationIdSuffix": ".debug"
     }
