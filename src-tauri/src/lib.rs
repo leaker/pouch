@@ -56,16 +56,15 @@ pub fn run() {
         cache_store::cache_root().display()
     );
 
-    tauri::Builder::default()
-        // App menu carrying a single "Open DevTools" entry. The accelerator
-        // (Cmd+Option+I on macOS, Ctrl+Shift+I on Windows) only fires while
-        // pouch has focus, so it never fights the host IDE's bindings — which
-        // is exactly why we don't reach for `tauri-plugin-global-shortcut`.
-        // On Windows WebView2 also exposes F12 natively, so the menu item is
-        // mainly useful as a discoverable affordance there.
+    let result = tauri::Builder::default()
+        // App menu carrying a single "Open DevTools" entry. F12 works on
+        // both macOS and Windows for opening DevTools (matches Chrome on
+        // both platforms); the accelerator only fires while pouch has
+        // focus, so it never fights the host IDE's bindings — which is
+        // exactly why we don't reach for `tauri-plugin-global-shortcut`.
         .menu(|handle| {
             let open_devtools = MenuItemBuilder::with_id(MENU_ID_OPEN_DEVTOOLS, "Open DevTools")
-                .accelerator("CmdOrCtrl+Alt+I")
+                .accelerator("F12")
                 .build(handle)?;
             let view = SubmenuBuilder::new(handle, "View")
                 .item(&open_devtools)
@@ -119,6 +118,9 @@ pub fn run() {
                     // SPA-style `document.title = ...` mutation, so we don't
                     // need a JS MutationObserver / IPC trampoline.
                     .on_document_title_changed(|window, title| {
+                        if title.trim().is_empty() {
+                            return;
+                        }
                         if let Err(e) = window.set_title(&title) {
                             tracing::warn!(
                                 target: "hook",
@@ -179,8 +181,12 @@ pub fn run() {
 
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .run(tauri::generate_context!());
+
+    if let Err(e) = result {
+        tracing::error!(target: "hook", "tauri runtime exited with error: {e}");
+        std::process::exit(1);
+    }
 }
 
 /// Initialise the global tracing subscriber.

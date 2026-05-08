@@ -109,6 +109,7 @@ on:
     tags: ['v*']
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 # Default to read-only at the workflow level; the `release` job opts back in
 # to `contents: write` when it needs to publish a Release.
@@ -140,6 +141,9 @@ jobs:
 
       - name: Setup Rust (stable)
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Add x86_64 Apple Darwin target
+        run: rustup target add x86_64-apple-darwin
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
@@ -185,6 +189,8 @@ jobs:
       # ----------------------------------------------------------------------
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
+        with:
+          args: --target universal-apple-darwin
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -204,7 +210,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: macos-bundle
-          path: src-tauri/target/release/bundle/dmg/*.dmg
+          path: src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
           if-no-files-found: error
           retention-days: 7
 
@@ -348,6 +354,7 @@ jobs:
           name: ${{ github.ref_name }}
           draft: false
           prerelease: false
+          generate_release_notes: true
           fail_on_unmatched_files: true
           files: |
             artifacts/*.dmg

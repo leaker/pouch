@@ -1,10 +1,10 @@
 [package]
 name = "pouch"
-version = "0.0.1"
-description = "Pouch — desktop wrapper that hooks any web app's URL traffic into a local cache and runs custom JS at runtime"
-authors = ["you"]
-license = ""
-repository = ""
+version = "1.0.0"
+description = "macOS/Windows webview hook tool with on-disk caching, JS injection, and configurable URL filtering"
+authors = ["leaker"]
+license = "MIT"
+repository = "https://github.com/leaker/pouch"
 edition = "2021"
 rust-version = "1.77.2"
 
@@ -58,3 +58,9 @@ dispatch2 = "0.3"
 [dev-dependencies]
 mockito = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

@@ -102,8 +102,7 @@ TAURI_HOOK_LOG=hook=debug bun run tauri dev
 
 The Web Inspector is enabled in both debug and release builds (Pouch is a hook-debugging tool, so devtools always-on is the right default — wired via the `devtools` feature flag on the `tauri` crate).
 
-- macOS: `Cmd+Option+I` (or `View → Open DevTools` in the app menu)
-- Windows: `F12` (built into WebView2; the `View → Open DevTools` menu item also works)
+Press `F12` (or `View → Open DevTools` menu item) to open DevTools. Works on both macOS and Windows.
 
 ## 3. How it works
 
@@ -531,6 +530,7 @@ INFO hook: [startup] inject rules = 2 (dispatcher WILL be attached)
 - **`@match *` matches every URL**: including `about:blank` and `data:` subframes. Narrow it to at least `@match https://*` to match only http(s) origins
 - **macOS / Windows only**: Linux does not work (see §7)
 - **Cookie isolation**: cookies are split between two stores. The **webview** owns its own cookie jar (`NSHTTPCookieStorage` on macOS, the WebView2 cookie manager on Windows) and **reqwest** keeps its own in-process jar (enabled via `cookie_store(true)`). On a cache MISS / ignore-list passthrough, upstream `Set-Cookie` headers are forwarded verbatim to the webview (so it stores the cookie and replays it on subsequent requests) **and** stored in reqwest's jar (so further reqwest-driven fetches in the same session also carry it). The two jars are not bidirectionally synchronised, so cookies set by JS inside the webview are not visible to reqwest, and vice versa. On a cache HIT only `content_type` is replayed from the sidecar — the original `Set-Cookie` is intentionally not replayed (it would be stale)
+- **Cache HIT does not replay upstream security headers**: only `content_type` is replayed from the sidecar; security-relevant headers from the original upstream response (`Set-Cookie`, `Cache-Control`, `X-Frame-Options`, `Content-Security-Policy`, `Strict-Transport-Security`, `Vary`, etc.) are **not** re-emitted on subsequent HITs. If the cached resource depends on these headers for correctness or security, clear the cached entry to force a fresh upstream fetch
 - **Large files are buffered fully in memory**: `cache_store::read/write` loads each entry into a single `Vec<u8>`; resources > 100 MB may OOM (inherited from v1, left as future work to redo with streaming)
 - **WebView2 Runtime version requirement**: `ICoreWebView2_22` requires Runtime ≥ 1.0.2210.55 (early 2024); older versions fall back to document/iframe-only interception, with a clear log line prompting the user to upgrade the Runtime
 
