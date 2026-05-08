@@ -121,6 +121,17 @@ The DevTools button doubles as a state indicator: it shows the outlined `wrench.
 
 > **Reload behaviour**: The Reload button (Cmd+R) restarts the application to apply changes to `hook.config.json` and `inject/*.js`. This is implemented as a clean process restart (`app.restart()`) for predictable behavior.
 
+### 2.6 Multiple windows (macOS)
+
+Pouch runs as a single process and supports multiple `WebviewWindow`s sharing the same WebKit data store, so cookies, `localStorage`, and the disk cache are shared across windows. There are two ways to open extra windows:
+
+1. **Startup `windows` array in `hook.config.json`** — every entry is opened as its own window when Pouch launches, alongside the main `target_url` window. See §4.1 for the schema.
+2. **`File → New Window` (`Cmd+N`)** — pops a native `NSAlert` prompt asking for a URL; pressing Return (or clicking *Open*) opens that URL as an additional window. Escape / Cancel / non-http(s) input quietly closes the prompt.
+
+Each window gets its own titlebar accessory (Reveal / Reload / Toggle DevTools). The DevTools button is per-window — clicking the button or pressing F12 toggles DevTools on the focused window only — while the Reveal Folder button is process-global and the Reload button still restarts the whole application (so all windows close and reopen with the freshly-read config).
+
+This feature is currently macOS-only because the New Window prompt is implemented against `NSAlert`; the rest of the multi-window plumbing is cross-platform and the startup `windows` array works on Windows too.
+
 ## 3. How it works
 
 ```
@@ -270,6 +281,7 @@ Fields:
 | `target_url` | string (`http://` or `https://`) | No (falls through the priority chain when missing) | The real URL the main webview navigates to on launch (`WebviewUrl::External(target_url)`) |
 | `window` | `"screen"` \| `"fullscreen"` \| `{ "width": <px>, "height": <px> }` | No (default `"screen"`) | Initial window-size mode applied at launch. See §4.4. |
 | `ignore_urls` | array of entries (one of `suffix` / `wildcard` / `url_wildcard` / `url_regex`, plus optional `comment`) | No (missing/`null`/`[]` = no filtering) | Per-entry blacklist; matched URLs are fetched but never cached. See §4.3 for the four entry shapes. |
+| `windows` | array of strings (each `http://` or `https://`) | No (missing/`null`/`[]` = no extra windows) | Additional URLs to open as separate `WebviewWindow`s on launch (in addition to `target_url`). Each gets its own native window with shared cookies / cache and an independent webview lifecycle. Non-http(s) entries are dropped with a `warn` log. See §2.6. |
 
 ### 4.2 Priority chain
 

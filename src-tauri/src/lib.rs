@@ -28,33 +28,39 @@
 pub mod bootstrap;
 pub mod cache_store;
 pub mod config;
+pub mod dialog;
 pub mod hook;
 pub mod http_fetcher;
 pub mod inject;
 #[cfg(target_os = "macos")]
+mod recent_urls;
+#[cfg(target_os = "macos")]
 mod titlebar;
 pub mod util;
 
+#[cfg(target_os = "macos")]
+use tauri::menu::{AboutMetadata, PredefinedMenuItem};
 use tauri::{
     menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder},
     AppHandle, Manager, WebviewUrl, WebviewWindowBuilder,
 };
 
 use crate::config::{WindowConfig, WindowMode};
+use crate::util::{DEFAULT_WINDOW_HEIGHT, DEFAULT_WINDOW_WIDTH};
 use tracing_subscriber::{fmt::time::ChronoLocal, EnvFilter};
 
 /// Menu item id for the "Open DevTools" entry. Matched in `on_menu_event` to
 /// dispatch into [`tauri::WebviewWindow::open_devtools`].
 const MENU_ID_OPEN_DEVTOOLS: &str = "pouch.open_devtools";
 
-/// Default window inner size used when the user has not pinned an explicit
-/// `{ width, height }` in `hook.config.json`. Set on the `Screen` /
-/// `Fullscreen` / fallback branches so an unmaximize / un-fullscreen
-/// gesture restores the window to a sensible 1280x800 — without this,
-/// wry/Tauri falls back to the platform default of 800x600 which is too
-/// cramped for the kind of dashboards pouch typically targets.
-const DEFAULT_WINDOW_WIDTH: f64 = 1280.0;
-const DEFAULT_WINDOW_HEIGHT: f64 = 800.0;
+/// Menu item id for the macOS-only "File → New Window" entry (Cmd+N). Pops
+/// up a native `NSAlert` text-input prompt asking for a URL and, on OK,
+/// opens that URL as an additional `WebviewWindow` sharing cookies / cache
+/// with the main window. macOS-only because the prompt UI is hand-rolled
+/// against `NSAlert` + `NSTextField`; Windows / Linux would need a separate
+/// implementation that we don't currently ship.
+#[cfg(target_os = "macos")]
+const MENU_ID_NEW_WINDOW: &str = "pouch.new_window";
 
 /// Menu item id for the macOS-only "Reveal Pouch Folder in Finder" entry
 /// (Cmd+Shift+O). The title is also a paired `NSButton` accessory in the
@@ -76,24 +82,25 @@ const MENU_ID_RELOAD: &str = "pouch.reload";
 pub fn run() {
     init_tracing();
 
-    let result = tauri::Builder::default()
-        // App menu carrying a single "Open DevTools" entry. F12 works on
-        // both macOS and Windows for opening DevTools (matches Chrome on
-        // both platforms); the accelerator only fires while pouch has
-        // focus, so it never fights the host IDE's bindings — which is
-        // exactly why we don't reach for `tauri-plugin-global-shortcut`.
+    let build_result = tauri::Builder::default()
+        // Standard macOS menu bar: <App> / File / Edit / View / Window.
+        // F12 works on both macOS and Windows for opening DevTools
+        // (matches Chrome on both platforms); the accelerator only fires
+        // while pouch has focus, so it never fights the host IDE's
+        // bindings — which is exactly why we don't reach for
+        // `tauri-plugin-global-shortcut`.
+        //
+        // On non-macOS we keep the slim historical View-only bar: every
+        // companion entry (New Window's NSAlert prompt, Reveal Folder,
+        // Reload-from-Config's titlebar pairing) is macOS-only by design
+        // — see the `MENU_ID_*` doc comments above. There's nothing to
+        // gain by erecting empty File / Edit / Window submenus on
+        // Windows; the OS supplies window controls via the system menu.
         .menu(|handle| {
             let open_devtools = MenuItemBuilder::with_id(MENU_ID_OPEN_DEVTOOLS, "Open DevTools")
                 .accelerator("F12")
                 .build(handle)?;
 
-            // The "Reveal Pouch Folder in Finder" item is macOS-only: on
-            // Windows pouch is portable (the .exe sits next to its
-            // `inject/` and `overrides/` folders, no reveal entry point
-            // needed), and Linux likewise doesn't have a single canonical
-            // user-data dir to reveal. Cfg-gating the item — rather than
-            // a no-op stub — keeps the menubar visually accurate on each
-            // platform.
             let view_builder = SubmenuBuilder::new(handle, "View").item(&open_devtools);
             #[cfg(target_os = "macos")]
             let view_builder = {
@@ -106,10 +113,118 @@ pub fn run() {
                 let reload = MenuItemBuilder::with_id(MENU_ID_RELOAD, "Reload from Config")
                     .accelerator("CmdOrCtrl+R")
                     .build(handle)?;
-                view_builder.item(&reveal_folder).item(&reload)
+                view_builder
+                    .item(&reveal_folder)
+                    .separator()
+                    .item(&reload)
             };
             let view = view_builder.build()?;
-            MenuBuilder::new(handle).item(&view).build()
+
+            let menu_builder = MenuBuilder::new(handle);
+
+            // The full <App>/File/Edit/Window scaffolding is macOS-only.
+            // Tauri normally synthesises a default macOS menu when no
+            // `.menu(...)` is configured (see
+            // `Menu::default(app_handle)`); calling `.menu(...)` here
+            // *replaces* that default, so we have to ship the standard
+            // app / Edit / Window submenus ourselves to keep the macOS
+            // experience native — otherwise Cmd+Q / Cmd+H / Cmd+W /
+            // copy-paste / window-list-in-Window-menu all silently
+            // disappear from the menu bar (their key equivalents fall
+            // back to OS defaults but the visible menu UI vanishes).
+            #[cfg(target_os = "macos")]
+            let menu_builder = {
+                let new_window = MenuItemBuilder::with_id(MENU_ID_NEW_WINDOW, "New Window")
+                    .accelerator("CmdOrCtrl+N")
+                    .build(handle)?;
+
+                let pkg = handle.package_info();
+                // Display name shown in the macOS menu bar — must match the
+                // `productName` in `tauri.conf.json` ("Pouch") and the
+                // bundle name macOS displays in About / Hide / Quit, so the
+                // three menu entries read consistently. We deliberately do
+                // NOT use `pkg.name` here: that comes from Cargo's
+                // `package.name` ("pouch", lowercase per cargo convention)
+                // and would render "Hide pouch" / "Quit pouch" with a
+                // lowercase 'p' next to "About Pouch".
+                let product_name = "Pouch";
+                let about_metadata = AboutMetadata {
+                    name: Some(product_name.to_string()),
+                    version: Some(pkg.version.to_string()),
+                    ..Default::default()
+                };
+
+                // <AppName> menu — Apple HIG-standard layout. Tauri
+                // automatically labels this submenu using the running
+                // process name on macOS (NSApp swaps in the bundle name),
+                // so the title we pass is just a placeholder.
+                let app_submenu = SubmenuBuilder::new(handle, product_name)
+                    .item(&PredefinedMenuItem::about(
+                        handle,
+                        Some(&format!("About {product_name}")),
+                        Some(about_metadata),
+                    )?)
+                    .separator()
+                    .services()
+                    .separator()
+                    .item(&PredefinedMenuItem::hide(
+                        handle,
+                        Some(&format!("Hide {product_name}")),
+                    )?)
+                    .hide_others()
+                    .show_all()
+                    .separator()
+                    .item(&PredefinedMenuItem::quit(
+                        handle,
+                        Some(&format!("Quit {product_name}")),
+                    )?)
+                    .build()?;
+
+                let file = SubmenuBuilder::new(handle, "File")
+                    .item(&new_window)
+                    .separator()
+                    .close_window()
+                    .build()?;
+
+                let edit = SubmenuBuilder::new(handle, "Edit")
+                    .cut()
+                    .copy()
+                    .paste()
+                    .separator()
+                    .select_all()
+                    .build()?;
+
+                // Tagging this submenu with `WINDOW_SUBMENU_ID` is the
+                // key step that hands ownership to NSApp: Tauri's
+                // `init_app_menu` (see tauri/src/app.rs) looks up this
+                // id and calls `set_as_windows_menu_for_nsapp()`, which
+                // in turn makes macOS auto-populate the running window
+                // list (with `Cmd+`` cycling and a checkmark on the
+                // focused window) and append items like "Bring All to
+                // Front" — none of which we have to track ourselves.
+                let window = SubmenuBuilder::with_id(
+                    handle,
+                    tauri::menu::WINDOW_SUBMENU_ID,
+                    "Window",
+                )
+                .minimize()
+                .maximize()
+                .separator()
+                .close_window()
+                .build()?;
+
+                menu_builder
+                    .item(&app_submenu)
+                    .item(&file)
+                    .item(&edit)
+                    .item(&view)
+                    .item(&window)
+            };
+
+            #[cfg(not(target_os = "macos"))]
+            let menu_builder = menu_builder.item(&view);
+
+            menu_builder.build()
         })
         .on_menu_event(|app, event| {
             if event.id() == MENU_ID_OPEN_DEVTOOLS {
@@ -122,7 +237,19 @@ pub fn run() {
                 // Windows in Tauri 2.9.5; on Windows the `else` arm is
                 // a quiet no-op, which is acceptable (parity with the
                 // upstream platform limit).
-                if let Some(webview) = app.get_webview_window("main") {
+                //
+                // Multi-window: target the **focused window** so F12 acts
+                // on whichever window the user is looking at. Falls back
+                // to `"main"` if no window is focused (rare — e.g.
+                // accelerator fired while focus is in another app's
+                // window which somehow got the keystroke). We can't use
+                // `Manager::get_focused_window` directly because that's
+                // gated on Tauri's `unstable` feature; iterating
+                // `webview_windows()` and matching `is_focused()` is the
+                // stable equivalent (cheap — typically a small map).
+                let target = focused_webview_window(app)
+                    .or_else(|| app.get_webview_window("main"));
+                if let Some(webview) = target {
                     let was_open = webview.is_devtools_open();
                     if was_open {
                         webview.close_devtools();
@@ -133,7 +260,7 @@ pub fn run() {
                     // button so the icon stays in sync regardless of
                     // which trigger (button / F12 / menu) flipped it.
                     #[cfg(target_os = "macos")]
-                    titlebar::update_devtools_button_image(!was_open);
+                    titlebar::update_devtools_button_image(webview.label(), !was_open);
                 }
             }
             #[cfg(target_os = "macos")]
@@ -151,6 +278,13 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             if event.id() == MENU_ID_RELOAD {
                 reload_from_config(app);
+            }
+            // File → New Window: pop a native NSAlert prompt for a URL
+            // and open it as an additional `WebviewWindow`. macOS-only
+            // (see `dialog.rs` for why).
+            #[cfg(target_os = "macos")]
+            if event.id() == MENU_ID_NEW_WINDOW {
+                dialog::show_new_window_dialog(app);
             }
         })
         .setup(|app| {
@@ -172,6 +306,14 @@ pub fn run() {
                 "[startup] cache root = {}",
                 cache_store::cache_root().display()
             );
+
+            // Cache the resolved window mode so the Cmd+N "New Window"
+            // handler — which only has `&AppHandle`, not the original
+            // `Config` — applies the same maximize / fullscreen / fixed-size
+            // mode to runtime-spawned extra windows that the main window
+            // and the startup `windows` array use. See
+            // `dialog::cache_window_config` for the storage rationale.
+            dialog::cache_window_config(cfg.window);
 
             // 1b. Pre-webview platform setup (macOS NSURLProtocol +
             //    WKBrowsingContextController; no-op on Windows).
@@ -256,7 +398,7 @@ pub fn run() {
             // We also chain `.inner_size(...)` on every branch (using
             // DEFAULT_WINDOW_{WIDTH,HEIGHT} when the user didn't pin an
             // explicit size) so the un-maximize / un-fullscreen gesture
-            // restores the window to a sensible 1280x800 instead of wry's
+            // restores the window to a sensible 1280x960 instead of wry's
             // 800x600 platform default.
             builder = match cfg.window {
                 WindowConfig::Mode(WindowMode::Screen) => builder
@@ -318,13 +460,54 @@ pub fn run() {
                 );
             }
 
+            // 5. Open additional startup windows declared in
+            //    `hook.config.json -> windows`. Each gets its own
+            //    `WebviewWindow` (label assigned via the same atomic
+            //    counter the Cmd+N New Window menu uses, so the two paths
+            //    can never collide on labels) and its own titlebar
+            //    accessory on macOS. Cookies / cache are shared with the
+            //    main window — Tauri v2's default is one shared
+            //    `WKWebViewConfiguration` / `ICoreWebView2Environment`
+            //    per process. See README §2.6.
+            for url_str in cfg.windows.iter() {
+                let label = dialog::next_window_label();
+                let url: url::Url = match url_str.parse() {
+                    Ok(u) => u,
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "hook",
+                            "[startup] windows entry url parse failed for {:?}: {}",
+                            url_str, e
+                        );
+                        continue;
+                    }
+                };
+                if let Err(e) = dialog::open_extra_window(app.handle(), &label, url, cfg.window) {
+                    tracing::warn!(
+                        target: "hook",
+                        "[startup] failed to create extra window {label}: {e}"
+                    );
+                }
+            }
+
             Ok(())
         })
-        .run(tauri::generate_context!());
+        .build(tauri::generate_context!());
 
-    if let Err(e) = result {
-        tracing::error!(target: "hook", "tauri runtime exited with error: {e}");
-        std::process::exit(1);
+    match build_result {
+        Ok(app) => {
+            app.run(|app_handle, event| {
+                if let tauri::RunEvent::ExitRequested { code, .. } = event {
+                    // Tauri 在所有 window 关闭后发出 ExitRequested（macOS 不自动退）。
+                    // hook-tokio runtime 是 OnceLock 永不 drop，必须显式 process::exit。
+                    app_handle.exit(code.unwrap_or(0));
+                }
+            });
+        }
+        Err(e) => {
+            tracing::error!(target: "hook", "tauri build failed: {e}");
+            std::process::exit(1);
+        }
     }
 }
 
@@ -343,6 +526,17 @@ pub fn reload_from_config(app: &AppHandle) {
         "[reload] restarting application to apply new config"
     );
     app.restart();
+}
+
+/// Stable equivalent of `Manager::get_focused_window` (which lives behind
+/// the `unstable` Cargo feature). Iterates the small `webview_windows()`
+/// map and returns the first window whose `is_focused()` is `Ok(true)`.
+/// Returns `None` if no window is focused (e.g. focus is in another app)
+/// or if every `is_focused()` call errored.
+fn focused_webview_window(app: &AppHandle) -> Option<tauri::WebviewWindow> {
+    app.webview_windows()
+        .into_values()
+        .find(|w| w.is_focused().unwrap_or(false))
 }
 
 /// Initialise the global tracing subscriber.

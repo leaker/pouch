@@ -21,6 +21,22 @@
 
 use std::path::{Component, Path, PathBuf};
 
+/// Default window inner size used when the user has not pinned an explicit
+/// `{ width, height }` in `hook.config.json`.
+///
+/// Set on the `Screen` / `Fullscreen` / fallback branches in `lib.rs::setup`
+/// and on every extra window created via `dialog::open_extra_window` (the
+/// startup `windows` array plus the Cmd+N runtime new-window dialog), so an
+/// unmaximize / un-fullscreen gesture, and any extra window's first paint,
+/// restores the window to a sensible 1280x960. Without this, wry/Tauri falls
+/// back to the platform default of 800x600 which is too cramped for the kind
+/// of dashboards pouch typically targets.
+///
+/// Single source of truth: both `lib.rs` (main window) and `dialog.rs`
+/// (extra windows) import these constants from here, never duplicated.
+pub const DEFAULT_WINDOW_WIDTH: f64 = 1280.0;
+pub const DEFAULT_WINDOW_HEIGHT: f64 = 960.0;
+
 /// Identifies which user-data slot a path resolver call is for. Used by
 /// [`user_data_dir`] / [`user_data_path`] only to log "for which slot" when
 /// helpful — the resolution rules do **not** branch on the variant.

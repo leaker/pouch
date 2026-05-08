@@ -56,6 +56,7 @@ objc2-web-kit = "0.3"
 # stops requiring it transitively).
 objc2-app-kit = { version = "0.3", features = [
     "NSButton",
+    "NSComboBox",
     "NSImage",
     "NSResponder",
     "NSView",

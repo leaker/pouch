@@ -30,6 +30,10 @@ dist/
 overrides/*
 !overrides/.gitkeep
 
+# Runtime-generated recent URLs list (dev build writes it next to the repo
+# root via the user-data resolver chain).
+recent_urls.json
+
 # OS / editor
 .DS_Store
 *.log

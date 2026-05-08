@@ -1,0 +1,365 @@
+//! macOS-only "New Window" prompt — a native `NSAlert` carrying an
+//! `NSComboBox` accessory view that asks the user for an http(s) URL and,
+//! on OK, opens it as an additional `WebviewWindow`. The combobox dropdown
+//! lists the user's recently submitted URLs (persisted by
+//! [`crate::recent_urls`]) so common destinations are one click away.
+//!
+//! Why a hand-rolled `NSAlert` instead of `tauri-plugin-dialog`:
+//!
+//! - We're already linking `objc2-app-kit` for the titlebar accessory work
+//!   (see [`crate::titlebar`]), so the marginal cost of an `NSAlert` here
+//!   is just the few lines below — no new crate.
+//! - `tauri-plugin-dialog`'s `ask` returns yes/no; it does not surface a
+//!   text-input prompt. Adding a plugin for one screen is more dependency
+//!   churn than this is worth.
+//! - The result UI is the canonical AppKit text-input alert that every
+//!   Mac user already recognises — escape cancels, return submits — without
+//!   us reproducing keyboard handling in a webview.
+//!
+//! Module-level cfg-gate (this file is only `mod`'d into the tree on
+//! macOS — see `lib.rs`); we still keep `#[cfg(target_os = "macos")]` on
+//! the public functions so a stray non-macOS `mod dialog;` would still
+//! fail to link rather than silently ship a broken stub.
+
+use std::cell::OnceCell;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+
+use crate::config::{WindowConfig, WindowMode};
+use crate::util::{DEFAULT_WINDOW_HEIGHT, DEFAULT_WINDOW_WIDTH};
+
+#[cfg(target_os = "macos")]
+use objc2::{msg_send, rc::Retained, runtime::AnyObject, MainThreadOnly};
+#[cfg(target_os = "macos")]
+use objc2_app_kit::{NSAlert, NSComboBox, NSImage};
+#[cfg(target_os = "macos")]
+use objc2_foundation::{ns_string, MainThreadMarker, NSPoint, NSRect, NSSize, NSString};
+
+/// `NSAlertFirstButtonReturn` — AppKit return code for "OK" (the first
+/// button we add). Explicit constant because objc2-app-kit doesn't re-export
+/// the named constant for our active feature set; `1000` is documented in
+/// `<AppKit/NSAlert.h>` and stable since macOS 10.9. Typed as the platform
+/// `NSInteger` (which `NSModalResponse` is just a type alias for) so the
+/// equality compare against `runModal()`'s return value type-checks without
+/// a cast.
+#[cfg(target_os = "macos")]
+const NS_ALERT_FIRST_BUTTON_RETURN: isize = 1000;
+
+/// Frame width / height of the accessory `NSComboBox`. 500pt is wide enough
+/// to show realistic URLs (deep paths, query strings, OAuth callbacks)
+/// without horizontal scrolling; 28pt is the default `NSComboBox` height
+/// (a touch taller than `NSTextField`'s 24pt because the dropdown chevron
+/// adds vertical padding) so the alert layout looks native.
+#[cfg(target_os = "macos")]
+const ACCESSORY_FIELD_W: f64 = 1280.0;
+#[cfg(target_os = "macos")]
+const ACCESSORY_FIELD_H: f64 = 28.0;
+
+/// How many history rows the `NSComboBox` dropdown reveals before scrolling.
+/// `NSComboBox`'s default is 5; we lift it to 8 so users with a small but
+/// growing history rarely have to scroll, while staying short enough that
+/// the dropdown doesn't dominate the alert vertically.
+#[cfg(target_os = "macos")]
+const COMBOBOX_VISIBLE_ITEMS: isize = 8;
+
+/// SF Symbol used as the alert icon. Replaces the default app-bundle icon
+/// (the blue Pouch.app folder badge) which is loud and off-topic for a
+/// "type a URL" prompt — `globe` reads as a generic, neutral "go to a web
+/// address" affordance and matches the http(s)-only contract spelled out
+/// in the informative text. Available on macOS 11+ (SF Symbols 1).
+#[cfg(target_os = "macos")]
+const ALERT_ICON_SYMBOL: &str = "globe";
+
+/// Process-wide counter producing unique `WebviewWindow` labels for windows
+/// created at runtime (the New Window dialog, plus the startup `windows`
+/// config-file array — both go through this counter so labels never
+/// collide). The main window is always `"main"`; everything else is
+/// `"window-2"`, `"window-3"`, ... in creation order.
+///
+/// Starts at 2 so the first dynamically-created window is `"window-2"` (the
+/// "1" slot conceptually belongs to the main window — keeps the numbering
+/// reading naturally).
+static NEXT_LABEL: AtomicUsize = AtomicUsize::new(2);
+
+/// Allocate the next unique window label. Called by both the startup
+/// `windows` array iteration in `lib.rs::setup` and the New Window menu
+/// handler so neither path can hand out a duplicate label (Tauri rejects
+/// duplicate labels in `WebviewWindowBuilder::build`).
+pub fn next_window_label() -> String {
+    let n = NEXT_LABEL.fetch_add(1, Ordering::SeqCst);
+    format!("window-{n}")
+}
+
+thread_local! {
+    /// Snapshot of `Config.window` cached at startup so the Cmd+N New Window
+    /// handler — which has only an `&AppHandle` and no access to the original
+    /// `Config` — can apply the same `WindowConfig` mode that the main window
+    /// (and the startup `windows` array) used. We use a `thread_local` because
+    /// both `cache_window_config` (called from `lib.rs::setup`) and
+    /// `current_window_config` (called from the menu handler / `NSAlert`
+    /// callback path) run on the AppKit main thread.
+    static CACHED_WINDOW_CONFIG: OnceCell<WindowConfig> = const { OnceCell::new() };
+}
+
+/// Cache the resolved `WindowConfig` once at startup. Called from
+/// `lib.rs::setup` exactly once with `cfg.window`. Subsequent `set` calls are
+/// silently ignored (`OnceCell::set` semantics) — there is currently no path
+/// that re-issues this; reload is implemented as a full process restart so
+/// the cached value is reset alongside everything else.
+pub fn cache_window_config(window_config: WindowConfig) {
+    CACHED_WINDOW_CONFIG.with(|c| {
+        let _ = c.set(window_config);
+    });
+}
+
+/// Read the cached `WindowConfig`, falling back to `WindowConfig::default()`
+/// (`Mode(Screen)`) if `cache_window_config` was never called — defensive
+/// against a future refactor that drops the setup-time cache call; the
+/// fallback matches what the JSON loader picks for a missing `window` field
+/// in `hook.config.json`.
+fn current_window_config() -> WindowConfig {
+    CACHED_WINDOW_CONFIG.with(|c| c.get().copied().unwrap_or_default())
+}
+
+/// Prompt the user for a URL and, on OK with a valid http(s) URL, open it
+/// as an additional `WebviewWindow`. Bound to `File → New Window` (Cmd+N).
+///
+/// Failure modes (each is non-fatal; the dialog simply closes / no window
+/// opens):
+/// - User clicks Cancel or hits Escape → silent return.
+/// - Submitted text is empty / not http(s) → warn log, no window.
+/// - `WebviewWindowBuilder::build` fails (e.g. label collision, which
+///   shouldn't happen given [`next_window_label`]) → warn log, no window.
+#[cfg(target_os = "macos")]
+pub fn show_new_window_dialog(app: &AppHandle) {
+    let raw = match prompt_url_via_alert() {
+        Some(s) => s,
+        None => return, // user cancelled
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+
+    let url: url::Url = match trimmed.parse() {
+        Ok(u) => u,
+        Err(e) => {
+            tracing::warn!(
+                target: "hook",
+                "[new-window] URL parse failed for {:?}: {}",
+                trimmed, e
+            );
+            return;
+        }
+    };
+    if url.scheme() != "http" && url.scheme() != "https" {
+        tracing::warn!(
+            target: "hook",
+            "[new-window] URL is not http(s); ignoring: {}",
+            url
+        );
+        return;
+    }
+
+    let label = next_window_label();
+    let window_config = current_window_config();
+    match open_extra_window(app, &label, url, window_config) {
+        Ok(_) => {
+            // Only record on success: a failed `build()` (e.g. label
+            // collision, which shouldn't happen given `next_window_label`)
+            // shouldn't pollute the dropdown with a URL the user can't
+            // actually visit. We persist the user's original input rather
+            // than the parsed `url::Url::to_string()` so the dropdown
+            // reflects exactly what they typed (e.g. preserving the
+            // trailing slash that `Url` would synthesise).
+            crate::recent_urls::add_recent_url(trimmed);
+        }
+        Err(e) => {
+            tracing::warn!(
+                target: "hook",
+                "[new-window] failed to create window {label}: {e}"
+            );
+        }
+    }
+}
+
+/// Run the modal `NSAlert` and return the contents of its accessory
+/// `NSComboBox` on OK, or `None` on Cancel / non-main-thread / a failed
+/// `MainThreadMarker::new` (the menu handler always runs on the main thread,
+/// so the latter never fires in practice).
+#[cfg(target_os = "macos")]
+fn prompt_url_via_alert() -> Option<String> {
+    let mtm = MainThreadMarker::new()?;
+    unsafe {
+        let alert = NSAlert::new(mtm);
+        alert.setMessageText(ns_string!("New Window"));
+        alert.setInformativeText(ns_string!("Enter a URL (http or https):"));
+
+        // Replace the default app-bundle icon (loud blue Pouch folder
+        // badge) with a neutral SF Symbol that reads as "go to a web
+        // address". Falls through to the AppKit default icon if the symbol
+        // isn't available (macOS < 11 — SF Symbols shipped in macOS 11).
+        let symbol = NSString::from_str(ALERT_ICON_SYMBOL);
+        let a11y = ns_string!("URL");
+        if let Some(icon) =
+            NSImage::imageWithSystemSymbolName_accessibilityDescription(&symbol, Some(a11y))
+        {
+            alert.setIcon(Some(&icon));
+        }
+
+        // Editable combobox: behaves like an `NSTextField` for typing
+        // (same defaults — editable, single-line, bezeled — because
+        // `NSComboBox` inherits from `NSTextField`) but exposes a dropdown
+        // chevron showing the user's recent URLs as quick-pick rows.
+        let field_frame = NSRect::new(
+            NSPoint::new(0.0, 0.0),
+            NSSize::new(ACCESSORY_FIELD_W, ACCESSORY_FIELD_H),
+        );
+        let combobox: Retained<NSComboBox> =
+            NSComboBox::initWithFrame(NSComboBox::alloc(mtm), field_frame);
+        // Pre-fill with `https://` so the user starts past the scheme —
+        // saves a few keystrokes and visually documents the http(s)-only
+        // contract. `setStringValue:` is inherited from `NSTextField`.
+        combobox.setStringValue(ns_string!("https://"));
+        combobox.setNumberOfVisibleItems(COMBOBOX_VISIBLE_ITEMS);
+
+        // Populate the dropdown with the persisted history (most-recent
+        // first — see `recent_urls::load_recent_urls`). Each
+        // `addItemWithObjectValue:` call takes any `id` (Objective-C
+        // object reference); we pass `NSString`s, the natural object value
+        // for a URL-typed combobox. We hold the `NSString`s in a `Vec` so
+        // the AppKit retain count is the only thing keeping them alive
+        // after the call returns — the locals would otherwise drop at the
+        // end of each loop iteration before AppKit could observe the
+        // strings. (Each `addItemWithObjectValue:` retains internally, so
+        // the `Vec` could in principle drop before `runModal`; keeping it
+        // until the end of the unsafe block is the conservatively-safe
+        // choice and costs nothing.)
+        let recent = crate::recent_urls::load_recent_urls();
+        let _ns_recent: Vec<Retained<NSString>> = recent
+            .iter()
+            .map(|url| {
+                let ns = NSString::from_str(url);
+                combobox.addItemWithObjectValue(&ns);
+                ns
+            })
+            .collect();
+
+        // `setAccessoryView:` takes `Option<&NSView>`. `NSComboBox` →
+        // `NSTextField` → `NSControl` → `NSView`, so the upcast goes
+        // through objc2's `Deref` chain just like the previous
+        // `NSTextField` accessory did.
+        alert.setAccessoryView(Some(&combobox));
+
+        // First button = "Open" → bound to NS_ALERT_FIRST_BUTTON_RETURN
+        // (1000). Second = "Cancel" → bound to NSAlertSecondButtonReturn
+        // (1001) and gets the Escape key equivalent automatically because
+        // its title is exactly "Cancel" (AppKit convention).
+        let _: Retained<AnyObject> = msg_send![&*alert, addButtonWithTitle: ns_string!("Open")];
+        let _: Retained<AnyObject> = msg_send![&*alert, addButtonWithTitle: ns_string!("Cancel")];
+
+        // `runModal` returns `NSModalResponse` (a typedef for `NSInteger` /
+        // Rust `isize`); compare directly against the OK return code.
+        let response = alert.runModal();
+        if response != NS_ALERT_FIRST_BUTTON_RETURN {
+            return None;
+        }
+
+        // `stringValue` is inherited from `NSTextField` — returns whatever
+        // the user typed (or selected from the dropdown, which AppKit
+        // copies into the field on selection).
+        let value: Retained<NSString> = combobox.stringValue();
+        Some(value.to_string())
+    }
+}
+
+/// Build a `WebviewWindow` for an extra URL. Shared by the startup
+/// `windows`-config path (`lib.rs::setup`) and the New Window dialog so
+/// both go through the same defaults: devtools enabled, native title-sync,
+/// no fixed title (lets upstream `<title>` win on first paint), and the
+/// shared `DEFAULT_WINDOW_{WIDTH,HEIGHT}` baseline so extra windows match
+/// the main window's default sizing instead of falling through to wry's
+/// 800x600 platform default — see [`crate::util::DEFAULT_WINDOW_WIDTH`].
+///
+/// `window_config` carries the same `WindowConfig` the main window uses so
+/// extra windows (whether spawned from the startup `windows` array or via
+/// Cmd+N) honour `hook.config.json -> window` (Screen / Fullscreen / Size)
+/// identically to the main window — the maximize / fullscreen / fixed-size
+/// match below mirrors `lib.rs::setup` exactly.
+///
+/// Cookies / storage are shared with the main window — Tauri v2's default
+/// is one shared `WKWebViewConfiguration` / `ICoreWebView2Environment` per
+/// process, which keeps the WebKit data store / WebView2 user-data folder
+/// shared across windows.
+pub fn open_extra_window(
+    app: &AppHandle,
+    label: &str,
+    url: url::Url,
+    window_config: WindowConfig,
+) -> tauri::Result<tauri::WebviewWindow> {
+    let mut builder = WebviewWindowBuilder::new(app, label, WebviewUrl::External(url))
+        .resizable(true)
+        .devtools(true)
+        .on_document_title_changed(|window, title| {
+            if title.trim().is_empty() {
+                return;
+            }
+            if let Err(e) = window.set_title(&title) {
+                tracing::warn!(
+                    target: "hook",
+                    "[title-sync] set_title({:?}) failed: {}",
+                    title,
+                    e
+                );
+            }
+        });
+
+    // Mirror `lib.rs::setup`'s mode-application match. We always set
+    // `fullscreen` and `maximized` explicitly so the extra window's mode is
+    // deterministic (never inheriting wry leftover state) and `inner_size`
+    // is set on every branch so an un-maximize / un-fullscreen gesture
+    // restores to a sensible 1280x960 instead of wry's 800x600 default.
+    builder = match window_config {
+        WindowConfig::Mode(WindowMode::Screen) => builder
+            .fullscreen(false)
+            .maximized(true)
+            .inner_size(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT),
+        WindowConfig::Mode(WindowMode::Fullscreen) => builder
+            .fullscreen(true)
+            .maximized(false)
+            .inner_size(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT),
+        WindowConfig::Size { width, height } if width > 0 && height > 0 => builder
+            .fullscreen(false)
+            .maximized(false)
+            .inner_size(f64::from(width), f64::from(height)),
+        WindowConfig::Size { width, height } => {
+            tracing::warn!(
+                target: "hook",
+                "[extra-window] window size {{ width: {}, height: {} }} has a zero dimension; falling back to default (screen)",
+                width,
+                height
+            );
+            builder
+                .fullscreen(false)
+                .maximized(true)
+                .inner_size(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT)
+        }
+    };
+
+    let window = builder.build()?;
+
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(w) = app.get_webview_window(label) {
+            if let Err(e) = crate::titlebar::install_titlebar_accessory(app, &w) {
+                tracing::warn!(
+                    target: "hook",
+                    "[new-window] titlebar accessory install failed for {label}: {e}"
+                );
+            }
+        }
+    }
+
+    Ok(window)
+}

@@ -34,6 +34,11 @@ pub struct Config {
     /// [`WindowConfig::default`] when missing from the JSON).
     #[serde(default)]
     pub window: WindowConfig,
+    /// Resolved list of additional startup windows. Each entry is a valid
+    /// http(s) URL; invalid / non-http(s) entries are dropped at load time
+    /// with a `warn` log. Empty when missing from the JSON. See README §4.x.
+    #[serde(default)]
+    pub windows: Vec<String>,
 }
 
 /// On-disk schema for `hook.config.json`. Kept separate from `Config` so
@@ -49,6 +54,12 @@ struct ConfigFile {
     /// startup; missing/null/empty all mean "no filtering".
     #[serde(default)]
     ignore_urls: Option<Vec<IgnoreEntry>>,
+    /// Optional list of additional URLs to open as separate startup windows
+    /// (in addition to the main `target_url` window). Each entry must be
+    /// http(s); non-http(s) / unparseable entries are dropped with a warn
+    /// at load time. Missing / null / empty all mean "no extra windows".
+    #[serde(default)]
+    windows: Option<Vec<String>>,
 }
 
 /// Initial window-size mode.
@@ -99,13 +110,14 @@ pub fn load() -> Config {
     // installed even when `target_url` is overridden via CLI / env.
     // We also pull the optional `window` field out here so the same JSON read
     // serves both target-url-fallback and window-config purposes.
-    let (json_target_url, window) = from_config_file();
+    let (json_target_url, window, windows) = from_config_file();
 
     if let Some(url) = from_cli_args() {
         info!(target: "hook", "[config] target_url from CLI arg: {}", url);
         return Config {
             target_url: url,
             window,
+            windows,
         };
     }
 
@@ -114,6 +126,7 @@ pub fn load() -> Config {
         return Config {
             target_url: url,
             window,
+            windows,
         };
     }
 
@@ -127,6 +140,7 @@ pub fn load() -> Config {
         return Config {
             target_url: url,
             window,
+            windows,
         };
     }
 
@@ -138,6 +152,7 @@ pub fn load() -> Config {
     Config {
         target_url: DEFAULT_TARGET_URL.to_string(),
         window,
+        windows,
     }
 }
 
@@ -172,14 +187,18 @@ fn from_env() -> Option<String> {
 /// - the resolved `target_url` plus the path we read it from (for logging), if
 ///   any candidate yielded a valid http(s) URL,
 /// - the resolved `WindowConfig` (defaulted when missing or when no candidate
-///   parsed successfully).
+///   parsed successfully),
+/// - the resolved list of additional startup windows (filtered to valid
+///   http(s) URLs only, empty when missing or when no candidate parsed
+///   successfully).
 ///
 /// Side-effect: when a candidate parses, also installs any `ignore_urls` rules
 /// into the global matcher set (see `hook::ignore_filter::set_matchers`),
 /// atomically replacing whatever was previously installed (so a Reload
 /// re-read picks up additions / removals / edits).
-fn from_config_file() -> (Option<(String, PathBuf)>, WindowConfig) {
+fn from_config_file() -> (Option<(String, PathBuf)>, WindowConfig, Vec<String>) {
     let mut window = WindowConfig::default();
+    let mut windows: Vec<String> = Vec::new();
     let mut target_url: Option<(String, PathBuf)> = None;
 
     for candidate in candidate_config_paths() {
@@ -215,12 +234,38 @@ fn from_config_file() -> (Option<(String, PathBuf)>, WindowConfig) {
                         if let Some(w) = parsed.window {
                             window = w;
                         }
+                        // `windows` follows the same "first-hit wins" pattern.
+                        // Filter to valid http(s) URLs and log a warn per
+                        // dropped entry so the operator knows why the window
+                        // they configured didn't open.
+                        if let Some(entries) = parsed.windows {
+                            for entry in entries {
+                                if looks_like_url(&entry) {
+                                    windows.push(entry);
+                                } else {
+                                    warn!(
+                                        target: "hook",
+                                        "[config] {} windows entry is not an http(s) URL; skipping: {:?}",
+                                        pretty_path(&candidate).display(),
+                                        entry
+                                    );
+                                }
+                            }
+                            if !windows.is_empty() {
+                                info!(
+                                    target: "hook",
+                                    "[config] {} windows = {} entrie(s)",
+                                    pretty_path(&candidate).display(),
+                                    windows.len()
+                                );
+                            }
+                        }
                     }
 
                     match parsed.target_url {
                         Some(url) if looks_like_url(&url) => {
                             target_url = Some((url, candidate));
-                            return (target_url, window);
+                            return (target_url, window, windows);
                         }
                         Some(url) => warn!(
                             target: "hook",
@@ -253,7 +298,7 @@ fn from_config_file() -> (Option<(String, PathBuf)>, WindowConfig) {
             ),
         }
     }
-    (target_url, window)
+    (target_url, window, windows)
 }
 
 /// All locations we will try, in priority order.
@@ -352,5 +397,23 @@ mod tests {
             WindowConfig::default(),
             WindowConfig::Mode(WindowMode::Screen)
         ));
+    }
+
+    #[test]
+    fn config_file_windows_field_parses() {
+        let parsed: ConfigFile = serde_json::from_str(
+            r#"{"windows": ["https://a.example/", "http://b.example/"]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            parsed.windows.as_deref(),
+            Some(&["https://a.example/".to_string(), "http://b.example/".to_string()][..])
+        );
+    }
+
+    #[test]
+    fn config_file_windows_missing_is_none() {
+        let parsed: ConfigFile = serde_json::from_str("{}").unwrap();
+        assert!(parsed.windows.is_none());
     }
 }
