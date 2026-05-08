@@ -46,7 +46,8 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Sel};
 use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{
-    NSButton, NSImage, NSLayoutAttribute, NSTitlebarAccessoryViewController, NSView, NSWindow,
+    NSButton, NSControlSize, NSImage, NSLayoutAttribute, NSProgressIndicator,
+    NSProgressIndicatorStyle, NSTitlebarAccessoryViewController, NSView, NSWindow,
 };
 use objc2_foundation::{ns_string, MainThreadMarker, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
 use tauri::{AppHandle, Manager, WindowEvent};
@@ -74,7 +75,19 @@ const BUTTON_W: f64 = 36.0;
 const BUTTON_H: f64 = 28.0;
 const BUTTON_SPACING: f64 = 4.0;
 const BUTTON_COUNT: f64 = 3.0;
-const ACCESSORY_W: f64 = BUTTON_W * BUTTON_COUNT + BUTTON_SPACING * (BUTTON_COUNT - 1.0);
+/// Spinning `NSProgressIndicator` size. 16pt is the conventional small-spinner
+/// edge length on macOS (`NSControlSize::Small` renders the spinner art at
+/// 16x16). Vertically centered inside the 28pt-tall accessory contentView at
+/// y = (28 - 16) / 2 = 6.
+const SPINNER_SIZE: f64 = 16.0;
+const SPINNER_Y: f64 = (BUTTON_H - SPINNER_SIZE) / 2.0;
+/// Spinner sits on the **left** of the three buttons so the user perceives
+/// the loading state before scanning across to the action buttons. When the
+/// spinner is hidden (the default — `setDisplayedWhenStopped(false)`) the
+/// 16pt slot just shows blank titlebar background, which is the desired
+/// visual outcome — no jiggle-on-show needed.
+const ACCESSORY_W: f64 =
+    SPINNER_SIZE + BUTTON_SPACING + BUTTON_W * BUTTON_COUNT + BUTTON_SPACING * (BUTTON_COUNT - 1.0);
 const ACCESSORY_H: f64 = BUTTON_H;
 
 // =====================================================================
@@ -213,6 +226,14 @@ thread_local! {
     /// `addSubview:`); we explicitly retain an extra reference for our own
     /// bookkeeping.
     static DEVTOOLS_BUTTONS: RefCell<HashMap<String, Retained<NSButton>>> = RefCell::new(HashMap::new());
+
+    /// Per-window `NSProgressIndicator` (spinning style) references so
+    /// [`set_loading`] can start / stop the spinner from the page-load
+    /// listener. Retained for the same reason the `DEVTOOLS_BUTTONS` entries
+    /// are: the parent NSView retains the spinner on `addSubview:`, but we
+    /// keep a strong reference for explicit lookup-by-label. Cleaned up by
+    /// [`cleanup_window_accessory`] on `WindowEvent::Destroyed`.
+    static SPINNERS: RefCell<HashMap<String, Retained<NSProgressIndicator>>> = RefCell::new(HashMap::new());
 }
 
 /// Install the titlebar accessory on `ns_window_ptr` for the given window
@@ -261,12 +282,20 @@ unsafe fn install_on_ns_window(
     );
     let content: Retained<NSView> = NSView::initWithFrame(NSView::alloc(mtm), content_frame);
 
+    // ---- Loading spinner (leftmost, hidden by default) ----
+    add_loading_spinner(&content, mtm, label);
+
+    // Buttons start to the right of the spinner slot, so even when the
+    // spinner is hidden (`setDisplayedWhenStopped(false)`) their layout
+    // is fixed — no shift on show / hide.
+    let buttons_origin_x = SPINNER_SIZE + BUTTON_SPACING;
+
     // ---- Button 1: Reveal Folder ----
     add_symbol_button(
         &content,
         target_obj,
         mtm,
-        0.0,
+        buttons_origin_x,
         ns_string!("folder"),
         ns_string!("Reveal Pouch Folder in Finder"),
         ns_string!("Reveal Pouch Folder in Finder (Cmd+Shift+O)"),
@@ -278,7 +307,7 @@ unsafe fn install_on_ns_window(
         &content,
         target_obj,
         mtm,
-        BUTTON_W + BUTTON_SPACING,
+        buttons_origin_x + BUTTON_W + BUTTON_SPACING,
         ns_string!("arrow.clockwise"),
         ns_string!("Reload from Config"),
         ns_string!("Reload from Config (Cmd+R)"),
@@ -296,7 +325,7 @@ unsafe fn install_on_ns_window(
         &content,
         target_obj,
         mtm,
-        (BUTTON_W + BUTTON_SPACING) * 2.0,
+        buttons_origin_x + (BUTTON_W + BUTTON_SPACING) * 2.0,
         label,
     );
 
@@ -408,6 +437,85 @@ fn add_devtools_button(
     });
 }
 
+/// Build a small spinning `NSProgressIndicator` and stash a `Retained` clone
+/// in `SPINNERS` keyed by `label` so [`set_loading`] can start / stop it from
+/// the page-load listener. The indicator is configured to **auto-hide while
+/// stopped** (`setDisplayedWhenStopped(false)`) so we never have to manage
+/// `setHidden:` ourselves — `startAnimation:` makes it visible, `stopAnimation:`
+/// makes it disappear. Threaded animation keeps the spinner smooth even when
+/// the main run loop is busy with WKWebView navigation work.
+fn add_loading_spinner(content: &NSView, mtm: MainThreadMarker, label: &str) {
+    let spinner: Retained<NSProgressIndicator> = NSProgressIndicator::initWithFrame(
+        NSProgressIndicator::alloc(mtm),
+        NSRect::new(
+            NSPoint::new(0.0, SPINNER_Y),
+            NSSize::new(SPINNER_SIZE, SPINNER_SIZE),
+        ),
+    );
+    spinner.setStyle(NSProgressIndicatorStyle::Spinning);
+    spinner.setControlSize(NSControlSize::Small);
+    // Spinning style is inherently indeterminate, but AppKit defaults to
+    // determinate (range 0..100); flipping this explicit avoids a subtle
+    // first-frame glitch on some macOS versions.
+    spinner.setIndeterminate(true);
+    // SAFETY: `setUsesThreadedAnimation:` is marked `unsafe` in objc2-app-kit
+    // because it spawns a secondary animation thread; safe in practice for
+    // the spinning style which is the documented use case.
+    unsafe {
+        spinner.setUsesThreadedAnimation(true);
+    }
+    spinner.setDisplayedWhenStopped(false);
+    content.addSubview(&spinner);
+
+    // Start animating immediately so the spinner is visible the moment the
+    // window appears — the cross-platform page-load `Started` event only
+    // fires once the WKWebView has received navigation first-byte, which
+    // can lag the window's first paint by hundreds of ms (webview process
+    // spin-up + DNS/TLS/server response). Subsequent `set_loading(true)`
+    // calls from the page-load listener are idempotent (`startAnimation:`
+    // is safe to call on an already-running indicator), and the matching
+    // `Finished` event stops + auto-hides the indicator via
+    // `setDisplayedWhenStopped(false)`.
+    //
+    // SAFETY: `startAnimation:` is marked `unsafe` in objc2-app-kit because
+    // it takes an `AnyObject` sender that the method dispatch could (in
+    // theory) treat unsoundly; passing `None` is the canonical "no sender"
+    // form documented by AppKit and is always safe.
+    unsafe {
+        spinner.startAnimation(None);
+    }
+
+    SPINNERS.with(|cell| {
+        cell.borrow_mut().insert(label.to_string(), spinner);
+    });
+}
+
+/// Start (`loading = true`) or stop (`loading = false`) the spinning loading
+/// indicator for `label`. Called from the cross-platform page-load listener
+/// in `lib.rs`. Silent no-op when no spinner is registered for `label` (e.g.
+/// the install path was skipped because we're on a non-macOS build, or the
+/// listener fired after `cleanup_window_accessory` ran on `Destroyed`).
+pub fn set_loading(label: &str, loading: bool) {
+    SPINNERS.with(|cell| {
+        let map = cell.borrow();
+        let Some(spinner) = map.get(label) else {
+            return;
+        };
+        // SAFETY: `startAnimation:` / `stopAnimation:` are marked `unsafe`
+        // in objc2-app-kit because they take an `AnyObject` sender that the
+        // method dispatch could (in theory) treat unsoundly; passing `None`
+        // is the canonical "no sender" form documented by AppKit and is
+        // always safe.
+        unsafe {
+            if loading {
+                spinner.startAnimation(None);
+            } else {
+                spinner.stopAnimation(None);
+            }
+        }
+    });
+}
+
 /// Swap the DevTools button's image for `label` to reflect `is_open`. Called
 /// from [`ButtonHandler::toggle_devtools`] right after the toggle so the icon
 /// follows the inspector's actual visibility, and from `lib.rs::on_menu_event`
@@ -462,6 +570,9 @@ pub fn cleanup_window_accessory(label: &str) {
         cell.borrow_mut().remove(label);
     });
     DEVTOOLS_BUTTONS.with(|cell| {
+        cell.borrow_mut().remove(label);
+    });
+    SPINNERS.with(|cell| {
         cell.borrow_mut().remove(label);
     });
     tracing::debug!(target: "hook", "[titlebar] cleanup done label={}", label);

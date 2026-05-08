@@ -296,6 +296,14 @@ pub fn open_extra_window(
 ) -> tauri::Result<tauri::WebviewWindow> {
     let url_for_log = url.to_string();
     let mut builder = WebviewWindowBuilder::new(app, label, WebviewUrl::External(url))
+        // Set the loading title at builder time so the NSWindow / HWND is
+        // born with `⏳ Loading...` as its initial title — closes the visual
+        // gap between window creation and the first post-build `set_title`,
+        // where the user could otherwise glimpse the default label-derived
+        // title for a frame. The post-build `set_title` below is kept as a
+        // redundant fallback in case `.title` silently no-ops on some
+        // platform.
+        .title(crate::LOADING_TITLE)
         .resizable(true)
         .devtools(true)
         .on_document_title_changed(|window, title| {
@@ -310,7 +318,8 @@ pub fn open_extra_window(
                     e
                 );
             }
-        });
+        })
+        .on_page_load(crate::page_load_handler());
 
     // Mirror `lib.rs::setup`'s mode-application match. We always set
     // `fullscreen` and `maximized` explicitly so the extra window's mode is
@@ -351,6 +360,21 @@ pub fn open_extra_window(
         label,
         url_for_log
     );
+    // Set the loading title prefix immediately on window creation so the
+    // user sees feedback the moment the window appears — the page-load
+    // `Started` event only fires after the WKWebView has received
+    // navigation first-byte, which can lag the window's first paint by
+    // hundreds of ms (webview process spin-up + DNS / TLS / server
+    // response). The shared `on_page_load(Started)` handler re-sets the
+    // same title later (idempotent), and `Finished` only swaps it for
+    // the host-derived fallback if the page never produced a `<title>`
+    // — see [`crate::page_load_handler`].
+    if let Err(e) = window.set_title(crate::LOADING_TITLE) {
+        tracing::warn!(
+            target: "hook",
+            "[new-window] initial set_title(loading) failed for {label}: {e}"
+        );
+    }
 
     #[cfg(target_os = "macos")]
     {

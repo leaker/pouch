@@ -42,7 +42,8 @@ pub mod util;
 use tauri::menu::{AboutMetadata, PredefinedMenuItem};
 use tauri::{
     menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder},
-    AppHandle, Manager, WebviewUrl, WebviewWindowBuilder,
+    webview::PageLoadEvent,
+    AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
 };
 
 use crate::config::{WindowConfig, WindowMode};
@@ -52,6 +53,19 @@ use tracing_subscriber::{fmt::time::ChronoLocal, EnvFilter};
 /// Menu item id for the "Open DevTools" entry. Matched in `on_menu_event` to
 /// dispatch into [`tauri::WebviewWindow::open_devtools`].
 const MENU_ID_OPEN_DEVTOOLS: &str = "pouch.open_devtools";
+
+/// Placeholder title shown while a navigation is in flight. Set
+/// immediately after `build()` (see main + extra window paths) and
+/// re-asserted on `PageLoadEvent::Started`. The `Finished` arm of
+/// [`page_load_handler`] uses this exact string as the marker for
+/// "the page never set its own `<title>`": if the current window title
+/// still starts with this prefix when `Finished` fires, the page didn't
+/// produce a real title and we fall back to the host string; otherwise
+/// the `on_document_title_changed` listener already swapped in the real
+/// `<title>` and we leave it alone. Centralised as a constant so
+/// dialog.rs / lib.rs (initial set) and the Started/Finished arms here
+/// can never drift apart and silently break the marker check.
+pub(crate) const LOADING_TITLE: &str = "\u{23f3} Loading...";
 
 /// Menu item id for the macOS-only "File → New Window" entry (Cmd+N). Pops
 /// up a native `NSAlert` text-input prompt asking for a URL and, on OK,
@@ -358,6 +372,17 @@ pub fn run() {
                 "main",
                 WebviewUrl::External(target_url),
             )
+            // Set the loading title at builder time so the NSWindow / HWND
+            // is born with `⏳ Loading...` as its initial title — this
+            // closes the visual gap between window creation and the first
+            // post-build `set_title` call, where the user could otherwise
+            // glimpse the default Tauri / label-derived title for a frame.
+            // Builder-time `.title(...)` forwards to wry, which calls
+            // `NSWindow.setTitle:` / `SetWindowTextW` before the window is
+            // ordered front. The post-build `set_title` below is kept as a
+            // redundant fallback in case `.title` silently no-ops on some
+            // platform.
+            .title(LOADING_TITLE)
             .resizable(true)
             // Enable the Web Inspector for both debug and release builds —
             // pouch is a hook-debugging tool, not a shrink-wrapped end-user
@@ -381,7 +406,8 @@ pub fn run() {
                         e
                     );
                 }
-            });
+            })
+            .on_page_load(page_load_handler());
 
             // Apply the user-configured window-size mode. We always set
             // `fullscreen` and `maximized` explicitly (defaulting to false)
@@ -432,12 +458,27 @@ pub fn run() {
                 builder = builder.initialization_script(js);
             }
 
-            let _main = builder.build()?;
+            let main_window = builder.build()?;
             tracing::debug!(
                 target: "hook",
                 "[window] created label=main url={}",
                 cfg.target_url
             );
+            // Set the loading title prefix immediately on window creation so
+            // the user sees feedback the moment the window appears — the
+            // page-load `Started` event only fires after the WKWebView has
+            // received navigation first-byte, which can lag the window's
+            // first paint by hundreds of ms (webview process spin-up + DNS /
+            // TLS / server response). The `on_page_load(Started)` handler
+            // re-sets the same title later (idempotent), and `Finished`
+            // only swaps it for the host-derived fallback if the page
+            // never produced a `<title>` — see [`page_load_handler`].
+            if let Err(e) = main_window.set_title(LOADING_TITLE) {
+                tracing::warn!(
+                    target: "hook",
+                    "[startup] main window initial set_title(loading) failed: {e}"
+                );
+            }
 
             // 3b. macOS-only: drop three SF Symbol buttons into the right
             //     side of the titlebar — Reveal Folder / Reload / Open
@@ -554,6 +595,79 @@ fn focused_webview_window(app: &AppHandle) -> Option<tauri::WebviewWindow> {
     app.webview_windows()
         .into_values()
         .find(|w| w.is_focused().unwrap_or(false))
+}
+
+/// Page-load callback factory shared by the main window builder and the
+/// extra-window helper in [`crate::dialog::open_extra_window`]. Wires the
+/// "loading" UI on both axes:
+///
+/// - **Window title**: prefixes with `⏳ Loading...` on `PageLoadEvent::Started`
+///   so users immediately see the navigation is in flight, even before the
+///   first paint. On `PageLoadEvent::Finished` we set a sensible host-derived
+///   fallback so the prefix doesn't linger if the upstream page never sets
+///   a `<title>`; if the page does set one, the existing
+///   [`tauri::webview::WebviewWindowBuilder::on_document_title_changed`]
+///   listener naturally overrides this fallback.
+/// - **macOS titlebar spinner**: starts / stops a small `NSProgressIndicator`
+///   alongside the existing reveal / reload / devtools buttons via
+///   [`crate::titlebar::set_loading`]. cfg-gated to macOS — non-macOS builds
+///   only get the title prefix.
+///
+/// `on_page_load` is a `WebviewWindowBuilder` method (i.e. registered at
+/// build time, not after `.build()`), so the helper returns a closure that
+/// the caller plugs into the builder chain.
+pub(crate) fn page_load_handler(
+) -> impl Fn(WebviewWindow, tauri::webview::PageLoadPayload<'_>) + Send + Sync + 'static {
+    |window, payload| {
+        match payload.event() {
+            PageLoadEvent::Started => {
+                if let Err(e) = window.set_title(LOADING_TITLE) {
+                    tracing::warn!(
+                        target: "hook",
+                        "[page-load] set_title(loading) failed: {e}"
+                    );
+                }
+                #[cfg(target_os = "macos")]
+                titlebar::set_loading(window.label(), true);
+            }
+            PageLoadEvent::Finished => {
+                #[cfg(target_os = "macos")]
+                titlebar::set_loading(window.label(), false);
+                // Host-derived fallback only when the page never produced
+                // its own `<title>`. The `on_document_title_changed`
+                // listener fires during HTML head parsing (well before
+                // `Finished`, which is `didFinishNavigation` /
+                // WebView2 `NavigationCompleted` — i.e. after every
+                // synchronously-loaded subresource), so by the time we
+                // get here the window title has *already* been swapped
+                // to the real `<title>` for any normal site. Detecting
+                // that via the LOADING_TITLE marker — rather than
+                // unconditionally overwriting — preserves the real
+                // title; previously this arm clobbered every page's
+                // `<title>` back to the bare host (e.g. "github.com")
+                // because `Finished` ran last and won.
+                let still_loading = window
+                    .title()
+                    .map(|t| t.starts_with(LOADING_TITLE))
+                    .unwrap_or(false);
+                if !still_loading {
+                    return;
+                }
+                let fallback = payload
+                    .url()
+                    .host_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| "Pouch".to_string());
+                if let Err(e) = window.set_title(&fallback) {
+                    tracing::warn!(
+                        target: "hook",
+                        "[page-load] set_title(fallback {:?}) failed: {e}",
+                        fallback
+                    );
+                }
+            }
+        }
+    }
 }
 
 /// Initialise the global tracing subscriber.
