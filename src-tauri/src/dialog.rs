@@ -115,11 +115,11 @@ pub fn cache_window_dimensions(window_dimensions: WindowDimensions) {
 }
 
 /// Read the cached `WindowDimensions`, falling back to
-/// `WindowDimensions::default()` (`Mode(Maximized)`) if
-/// `cache_window_dimensions` was never called — defensive against a future
-/// refactor that drops the setup-time cache call; the fallback matches what
-/// the JSON loader picks for a missing `window_dimensions` field in
-/// `hook.config.json`.
+/// `WindowDimensions::default()` (`Mode(Inherit)` — first-launch fallback to
+/// the default 1280x960 geometry) if `cache_window_dimensions` was never
+/// called — defensive against a future refactor that drops the setup-time
+/// cache call; the fallback matches what the JSON loader picks for a missing
+/// `window_dimensions` field in `hook.config.json`.
 fn current_window_dimensions() -> WindowDimensions {
     CACHED_WINDOW_DIMENSIONS.with(|c| c.get().copied().unwrap_or_default())
 }

@@ -39,8 +39,6 @@ storage.db
 storage.db-journal
 storage.db-wal
 storage.db-shm
-storage.json
-recent_urls.json
 
 # OS / editor
 .DS_Store

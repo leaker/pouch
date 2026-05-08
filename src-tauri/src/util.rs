@@ -24,9 +24,9 @@ use std::path::{Component, Path, PathBuf};
 /// Default window inner size used when the user has not pinned an explicit
 /// `{ width, height }` in `hook.config.json`.
 ///
-/// Set on the `Screen` / `Fullscreen` / fallback branches in `lib.rs::setup`
-/// and on every extra window created via `dialog::open_extra_window` (the
-/// startup `windows` array plus the Cmd+N runtime new-window dialog), so an
+/// Used by `Default` / `Maximized` / `Fullscreen` / fallback branches in
+/// `lib.rs::setup` and `dialog::open_extra_window` (each entry of
+/// `startup_urls` plus the Cmd+N runtime new-window dialog), so an
 /// unmaximize / un-fullscreen gesture, and any extra window's first paint,
 /// restores the window to a sensible 1280x960. Without this, wry/Tauri falls
 /// back to the platform default of 800x600 which is too cramped for the kind

@@ -690,9 +690,14 @@ pouch/
 │       ├── main.rs
 │       ├── lib.rs            # wiring: config::load + install_global + programmatic webview + install_for_webview
 │       ├── inject.rs         # scans inject/*.js + frontmatter parsing + dispatcher generation
-│       ├── config.rs         # CLI > env > json > default priority chain
+│       ├── config.rs         # json file only (CLI / env override removed in v1.1)
 │       ├── cache_store.rs    # atomic write + sidecar + clear_* helpers (no longer wired to IPC)
 │       ├── http_fetcher.rs   # reqwest + rustls + strip conditional headers
+│       ├── dialog.rs         # macOS NSAlert URL prompt + open_extra_window
+│       ├── titlebar.rs       # macOS NSTitlebarAccessoryViewController three buttons + spinner
+│       ├── storage.rs        # SQLite-backed window_state / recent_urls persistence
+│       ├── bootstrap.rs      # macOS first-run copy default config from .app/Contents/Resources/sample/
+│       ├── util.rs           # pretty_path / lexical_normalize + macos_app_support_dir + DEFAULT_WINDOW_WIDTH/HEIGHT
 │       └── hook/
 │           ├── mod.rs
 │           ├── ignore_filter.rs    # config-driven ignore_urls matchers
