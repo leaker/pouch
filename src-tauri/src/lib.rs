@@ -32,8 +32,15 @@ pub mod http_fetcher;
 pub mod inject;
 pub mod util;
 
-use tauri::{WebviewUrl, WebviewWindowBuilder};
+use tauri::{
+    menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder},
+    Manager, WebviewUrl, WebviewWindowBuilder,
+};
 use tracing_subscriber::EnvFilter;
+
+/// Menu item id for the "Open DevTools" entry. Matched in `on_menu_event` to
+/// dispatch into [`tauri::WebviewWindow::open_devtools`].
+const MENU_ID_OPEN_DEVTOOLS: &str = "pouch.open_devtools";
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -48,6 +55,28 @@ pub fn run() {
     );
 
     tauri::Builder::default()
+        // App menu carrying a single "Open DevTools" entry. The accelerator
+        // (Cmd+Option+I on macOS, Ctrl+Shift+I on Windows) only fires while
+        // pouch has focus, so it never fights the host IDE's bindings — which
+        // is exactly why we don't reach for `tauri-plugin-global-shortcut`.
+        // On Windows WebView2 also exposes F12 natively, so the menu item is
+        // mainly useful as a discoverable affordance there.
+        .menu(|handle| {
+            let open_devtools = MenuItemBuilder::with_id(MENU_ID_OPEN_DEVTOOLS, "Open DevTools")
+                .accelerator("CmdOrCtrl+Alt+I")
+                .build(handle)?;
+            let view = SubmenuBuilder::new(handle, "View")
+                .item(&open_devtools)
+                .build()?;
+            MenuBuilder::new(handle).item(&view).build()
+        })
+        .on_menu_event(|app, event| {
+            if event.id() == MENU_ID_OPEN_DEVTOOLS {
+                if let Some(webview) = app.get_webview_window("main") {
+                    webview.open_devtools();
+                }
+            }
+        })
         .setup(move |app| {
             // 1. Pre-webview platform setup (macOS NSURLProtocol +
             //    WKBrowsingContextController; no-op on Windows).
@@ -78,6 +107,13 @@ pub fn run() {
                     .inner_size(1024.0, 768.0)
                     .resizable(true)
                     .fullscreen(false)
+                    // Enable the Web Inspector for both debug and release
+                    // builds — pouch is a hook-debugging tool, not a
+                    // shrink-wrapped end-user product. Pairs with the
+                    // `tauri = { features = ["devtools"] }` flag in
+                    // Cargo.toml so the underlying `open_devtools` symbol is
+                    // compiled in for release as well.
+                    .devtools(true)
                     // Native bridge from WKWebView/WebView2's title KVO to the
                     // Tauri window title. Fires on initial load AND on every
                     // SPA-style `document.title = ...` mutation, so we don't

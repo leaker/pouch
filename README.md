@@ -98,6 +98,13 @@ TAURI_HOOK_LOG=hook=debug bun run tauri dev
 ./pouch https://example.com/
 ```
 
+### 2.5 Open DevTools
+
+The Web Inspector is enabled in both debug and release builds (Pouch is a hook-debugging tool, so devtools always-on is the right default — wired via the `devtools` feature flag on the `tauri` crate).
+
+- macOS: `Cmd+Option+I` (or `View → Open DevTools` in the app menu)
+- Windows: `F12` (built into WebView2; the `View → Open DevTools` menu item also works)
+
 ## 3. How it works
 
 ```
