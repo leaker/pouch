@@ -363,6 +363,7 @@ pub fn open_extra_window(
             .fullscreen(false)
             .maximized(false)
             .inner_size(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT),
+        WindowDimensions::Mode(WindowDimensionsMode::Inherit) => crate::apply_inherit_mode(builder),
         WindowDimensions::Mode(WindowDimensionsMode::Maximized) => builder
             .fullscreen(false)
             .maximized(true)
@@ -423,6 +424,11 @@ pub fn open_extra_window(
             }
         }
     }
+
+    // Cross-platform: persist this extra window's resize / move events into
+    // `storage.json` for the next session's `inherit`-mode restore. Mirrors
+    // the main-window hookup in `lib.rs::create_main_window_with_url`.
+    crate::install_window_state_listener(&window);
 
     Ok(window)
 }

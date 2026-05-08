@@ -34,6 +34,7 @@ pub mod http_fetcher;
 pub mod inject;
 #[cfg(target_os = "macos")]
 mod recent_urls;
+pub mod storage;
 #[cfg(target_os = "macos")]
 mod titlebar;
 pub mod util;
@@ -43,10 +44,14 @@ use tauri::menu::{AboutMetadata, PredefinedMenuItem};
 use tauri::{
     menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder},
     webview::PageLoadEvent,
-    AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
+    AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent,
 };
 
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+
 use crate::config::{WindowDimensions, WindowDimensionsMode};
+use crate::storage::WindowState;
 use crate::util::{DEFAULT_WINDOW_HEIGHT, DEFAULT_WINDOW_WIDTH};
 use tracing_subscriber::{fmt::time::ChronoLocal, EnvFilter};
 
@@ -612,6 +617,7 @@ fn create_main_window_with_url(
             .fullscreen(false)
             .maximized(false)
             .inner_size(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT),
+        WindowDimensions::Mode(WindowDimensionsMode::Inherit) => apply_inherit_mode(builder),
         WindowDimensions::Mode(WindowDimensionsMode::Maximized) => builder
             .fullscreen(false)
             .maximized(true)
@@ -672,7 +678,170 @@ fn create_main_window_with_url(
         }
     }
 
+    // Cross-platform: attach the resize/move debounced state-saver so any
+    // window-shape change ends up persisted in `storage.json` for the next
+    // session's `window_dimensions: "inherit"` restore.
+    install_window_state_listener(&main_window);
+
     Ok(main_window)
+}
+
+/// Apply `WindowDimensions::Mode(Inherit)` to a `WebviewWindowBuilder`:
+/// load the persisted [`storage::WindowState`] from `storage.json` and
+/// re-apply its position / size / maximised / fullscreen mode. Falls back to
+/// the `Default` mode geometry (1280x960, not maximised, not fullscreen)
+/// when no state has been recorded yet — typical on first launch, also the
+/// path taken when `storage.json` is corrupt or unreadable (see
+/// [`storage::load_storage`] failure-mode contract).
+///
+/// Shared by the main-window builder in `create_main_window_with_url` and
+/// the extra-window builder in [`crate::dialog::open_extra_window`] so both
+/// resolve `Inherit` identically — every startup window opens at the same
+/// last-session geometry. (Multi-window users with `Inherit` therefore see
+/// every window stack at the same recorded position; this matches how the
+/// other modes — Default / Maximized / Fullscreen / Size — also apply
+/// uniformly to every startup window.)
+pub(crate) fn apply_inherit_mode<R: tauri::Runtime, M: Manager<R>>(
+    builder: WebviewWindowBuilder<'_, R, M>,
+) -> WebviewWindowBuilder<'_, R, M> {
+    match storage::load_storage().window_state {
+        Some(state) if state.width > 0 && state.height > 0 => builder
+            .position(f64::from(state.x), f64::from(state.y))
+            .inner_size(f64::from(state.width), f64::from(state.height))
+            .maximized(state.maximized)
+            .fullscreen(state.fullscreen),
+        _ => {
+            // First launch / missing / zero-dim state → match the `Default`
+            // mode baseline. Logged at debug because it's the expected
+            // first-run path, not an error.
+            tracing::debug!(
+                target: "hook",
+                "[window-state] inherit mode: no recorded state, falling back to default 1280x960"
+            );
+            builder
+                .fullscreen(false)
+                .maximized(false)
+                .inner_size(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT)
+        }
+    }
+}
+
+/// Process-wide version counter for the debounced state-save scheduler.
+/// Every `Resized` / `Moved` event bumps this counter and spawns a 1-second
+/// sleep task; on wake-up the task only writes to disk if its captured
+/// version is still the latest, otherwise a newer event has superseded it.
+/// `AtomicU64` is overkill for the wraparound risk (we'd need ~5e11 events
+/// per session to wrap) but it's the simplest "always-fresh ticket" the
+/// debouncer needs and costs nothing.
+static SAVE_VERSION: AtomicU64 = AtomicU64::new(0);
+
+/// Debounce interval for the `Resized` / `Moved` → save pipeline. One second
+/// is comfortably longer than a typical drag-resize burst (the OS fires
+/// dozens of events while the cursor is being dragged) so we end up writing
+/// once after the gesture completes, never mid-drag.
+const SAVE_DEBOUNCE: Duration = Duration::from_secs(1);
+
+/// Hook the per-window resize / move events so the geometry ends up
+/// persisted in `storage.json` for the next session's
+/// `window_dimensions: "inherit"` restore. Cross-platform — runs on every
+/// platform, not just macOS — so Windows / Linux users also benefit from
+/// the inherit mode.
+///
+/// Implementation note: every `WebviewWindow` already has a
+/// `tauri::WindowEvent` listener attached on macOS via
+/// [`crate::titlebar::install_titlebar_accessory`] (for the `Destroyed`
+/// cleanup path). Tauri's `on_window_event` is **additive** — multiple
+/// listeners can be registered against the same window and all fire — so
+/// adding a second listener here doesn't disturb the existing one.
+pub(crate) fn install_window_state_listener(window: &WebviewWindow) {
+    let win = window.clone();
+    let label = window.label().to_string();
+    window.on_window_event(move |event| match event {
+        WindowEvent::Resized(_) | WindowEvent::Moved(_) => {
+            schedule_save_state(&win, &label);
+        }
+        _ => {}
+    });
+}
+
+/// Schedule a 1-second-debounced save of `window`'s current geometry. Called
+/// from the `Resized` / `Moved` event listener. Multi-window safe: every
+/// window's listener feeds the same global [`SAVE_VERSION`] counter, so a
+/// burst of events from any combination of windows collapses to a single
+/// save after the burst quiesces — and the save reflects whichever window
+/// fired the **last** event in the burst, which matches the design
+/// contract that all windows share one persisted state.
+fn schedule_save_state(window: &WebviewWindow, label: &str) {
+    let my_version = SAVE_VERSION.fetch_add(1, Ordering::SeqCst) + 1;
+    let window = window.clone();
+    let label = label.to_string();
+
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(SAVE_DEBOUNCE).await;
+        // Bail out if a newer event came in while we were sleeping — the
+        // newer task's eventual wake-up will write the up-to-date state.
+        if SAVE_VERSION.load(Ordering::SeqCst) != my_version {
+            return;
+        }
+        let state = match capture_window_state(&window) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(
+                    target: "hook",
+                    "[window-state] capture for label={label} failed: {e}"
+                );
+                return;
+            }
+        };
+        tracing::trace!(
+            target: "hook",
+            "[window-state] save label={label} state={state:?}"
+        );
+        // Hop the disk write off the async runtime — `save_window_state`
+        // does sync `std::fs` I/O which is fine on the current
+        // tokio::rt-multi-thread runtime, but `spawn_blocking` still keeps
+        // the worker pool unblocked for any other task. The error path
+        // (rare — unlikely the runtime would fail to spawn here) just
+        // logs and moves on; window-state persistence is a UX nicety.
+        if let Err(e) = tauri::async_runtime::spawn_blocking(move || {
+            storage::save_window_state(state);
+        })
+        .await
+        {
+            tracing::warn!(
+                target: "hook",
+                "[window-state] spawn_blocking save for label={label} failed: {e}"
+            );
+        }
+    });
+}
+
+/// Snapshot the current geometry / mode of `window` into a
+/// [`storage::WindowState`]. Returns `Err` if any of the underlying Tauri
+/// calls fails — `outer_position` / `inner_size` round-trip through the
+/// platform window manager and can return an error if the window has been
+/// destroyed mid-flight (rare but possible: an `is_*` query racing the
+/// `Destroyed` event). On error the caller logs and skips the save.
+///
+/// `is_maximized` / `is_fullscreen` use `unwrap_or(false)` rather than
+/// propagating their errors because a failed query for those bits is
+/// strictly less useful than recording position/size with the mode bits
+/// set to `false` (the next inherit will then just open at the recorded
+/// size, which is the right user-visible behaviour even if the actual
+/// query failed).
+fn capture_window_state(window: &WebviewWindow) -> tauri::Result<WindowState> {
+    let pos = window.outer_position()?;
+    let size = window.inner_size()?;
+    let maximized = window.is_maximized().unwrap_or(false);
+    let fullscreen = window.is_fullscreen().unwrap_or(false);
+    Ok(WindowState {
+        x: pos.x,
+        y: pos.y,
+        width: size.width,
+        height: size.height,
+        maximized,
+        fullscreen,
+    })
 }
 
 /// Reload by restarting the application. `hook.config.json` and

@@ -296,7 +296,7 @@ Fields:
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `startup_urls` | array of strings (each `http://` or `https://`) | No (missing/`null`/`[]` = prompt the user via NSAlert at startup; Cancel exits — see §2.6 / §4.2) | URLs to open at launch. The first valid entry becomes the main `WebviewWindow` (`label = "main"`, `WebviewUrl::External(url)`); every subsequent entry opens as its own extra window with shared cookies / cache and an independent webview lifecycle. Non-http(s) entries are dropped with a `warn` log. See §2.6. |
-| `window_dimensions` | `"default"` \| `"maximized"` \| `"fullscreen"` \| `{ "width": <px>, "height": <px> }` | No (default `"maximized"`) | Initial window dimensions applied at launch (uniformly to the main window and every extra window). VSCode-style naming. See §4.4. |
+| `window_dimensions` | `"default"` \| `"inherit"` \| `"maximized"` \| `"fullscreen"` \| `{ "width": <px>, "height": <px> }` | No (default `"maximized"`) | Initial window dimensions applied at launch (uniformly to the main window and every extra window). VSCode-style naming. `"inherit"` restores from `storage.json` — see §5.5. See §4.4. |
 | `ignore_urls` | array of entries (one of `suffix` / `wildcard` / `url_wildcard` / `url_regex`, plus optional `comment`) | No (missing/`null`/`[]` = no filtering) | Per-entry blacklist; matched URLs are fetched but never cached. See §4.3 for the four entry shapes. |
 
 > **Schema break in v1.1**: the previous fields `target_url` (single string) and `windows` (array) have been **unified into the single `startup_urls` array**. There is no deprecation alias — users upgrading from v1.0.x must edit `hook.config.json` by hand. The `TAURI_HOOK_TARGET_URL` environment variable and the `argv[1]` URL override have also been removed in the same change (everything goes through `startup_urls` now).
@@ -361,6 +361,7 @@ Controls the initial window dimensions. VSCode-style naming for clarity — the 
 | Value | Behaviour |
 |---|---|
 | `"default"` | Ordinary floating window at the `DEFAULT_WINDOW_{WIDTH,HEIGHT}` (1280x960) baseline; not maximised, not fullscreen. Useful when the user wants to position / resize the window manually. |
+| `"inherit"` | Restore the window's position, size, and mode (maximised / fullscreen) from the previous session. State is persisted in `storage.json` (see §5.5) — every Resize / Move gesture writes the new geometry after a 1-second debounce. Falls back to `"default"`'s 1280x960 geometry on first launch (when no state has been recorded yet). |
 | `"maximized"` (**default**) | Fills the work area — excludes the macOS menubar / dock and the Windows taskbar. Implemented via Tauri's `WebviewWindowBuilder::maximized(true)`, which the underlying wry layer forwards to `NSWindow.zoom:` on macOS and `ShowWindow(SW_MAXIMIZE)` on Windows so the OS work area is honoured natively. |
 | `"fullscreen"` | Real fullscreen via `WebviewWindowBuilder::fullscreen(true)` — hides window chrome (title bar, traffic lights, taskbar). |
 | `{ "width": <px>, "height": <px> }` | Fixed logical-pixel inner size via `WebviewWindowBuilder::inner_size(width, height)`. Logical pixels are DPR-independent (a `1280` here is the same physical width on a Retina display as on a non-Retina one). |
@@ -369,6 +370,10 @@ Examples:
 
 ```json
 "window_dimensions": "default"
+```
+
+```json
+"window_dimensions": "inherit"
 ```
 
 ```json
@@ -497,6 +502,40 @@ Clear an entire host: `rm -rf overrides/<host>`.
 Clear everything: `rm -rf overrides/* && touch overrides/.gitkeep`.
 
 Pouch **does not expose** IPC `clear_*` commands — there is no frontend trampoline page and no IPC bridge. If you need programmatic cache clearing at runtime, re-attach `#[tauri::command]` and a capability to `cache_store`'s `clear_url` / `clear_host` / `clear_all` helpers in your fork, or simply rely on "delete `overrides/` and restart the webview".
+
+### 5.5 `storage.json` (window-state persistence)
+
+Source: [`src-tauri/src/storage.rs`](src-tauri/src/storage.rs)
+
+`storage.json` lives **alongside** `hook.config.json` (same parent directory — i.e. `<repo>/storage.json` in dev, `~/Library/Application Support/Pouch/storage.json` on macOS release, `<exe parent>/storage.json` on Windows / Linux release). It records the most-recent window geometry so `window_dimensions: "inherit"` can restore where the user left off on the next launch.
+
+```json
+{
+  "window_state": {
+    "x": 120,
+    "y": 80,
+    "width": 1280,
+    "height": 960,
+    "maximized": false,
+    "fullscreen": false
+  }
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `x` / `y` | i32 | Outer position in screen pixels (matches Tauri's `outer_position`). |
+| `width` / `height` | u32 | Inner size in logical pixels (matches Tauri's `inner_size` — DPR-independent). |
+| `maximized` | bool | Whether the window was maximised when last saved. |
+| `fullscreen` | bool | Whether the window was in real fullscreen when last saved. |
+
+**Write timing**: every `Resized` / `Moved` window event schedules a write 1 second later. Within the 1-second window, every additional event resets the timer (debounce), so a multi-event drag-resize burst collapses to one disk write after the gesture quiesces — the file is **never** updated mid-drag.
+
+**Multi-window**: there is one `window_state` slot shared across every Pouch window (main + extras from `startup_urls` + Cmd+N). When several windows are alive, the saved state reflects whichever window most recently fired the latest event in the burst. This is intentional — the contract is "open the next session at the last-known geometry", not "track every window separately".
+
+**First launch / corrupt file**: missing file, malformed JSON, or `window_state: null` all resolve to the `"default"` mode geometry (1280x960, not maximised, not fullscreen) — the loader silently starts fresh rather than panicking, since window-state persistence is a UX nicety, never a correctness path.
+
+**Manual editing**: the file is plain JSON — edit / delete it with any text editor (e.g. delete it to forget the last-session geometry; the next launch then opens at the 1280x960 default).
 
 ## 6. JS injection
 

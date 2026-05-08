@@ -76,6 +76,10 @@ struct ConfigFile {
 /// - `"default"`    → ordinary floating window at the
 ///   `DEFAULT_WINDOW_{WIDTH,HEIGHT}` (1280x960) baseline; not maximised, not
 ///   fullscreen.
+/// - `"inherit"`    → restore position / size / mode from the previous
+///   session (persisted in `storage.json` — see [`crate::storage`]); falls
+///   back to the same default 1280x960 geometry as `"default"` on first
+///   launch.
 /// - `"maximized"`  → fill the work area (excludes macOS menubar/dock or
 ///   Windows taskbar). Default when the field is omitted.
 /// - `"fullscreen"` → real fullscreen, hides window chrome.
@@ -83,7 +87,7 @@ struct ConfigFile {
 #[derive(Debug, Deserialize, Serialize, Clone, Copy)]
 #[serde(untagged)]
 pub enum WindowDimensions {
-    /// String mode: `"default"` | `"maximized"` | `"fullscreen"`.
+    /// String mode: `"default"` | `"inherit"` | `"maximized"` | `"fullscreen"`.
     Mode(WindowDimensionsMode),
     /// Pixel size: `{ "width": <px>, "height": <px> }`. `u32` deserialisation
     /// already rejects negatives; zero values fall back to default at apply
@@ -95,6 +99,13 @@ pub enum WindowDimensions {
 #[serde(rename_all = "lowercase")]
 pub enum WindowDimensionsMode {
     Default,
+    /// Restore the last persisted window position / size / mode from
+    /// `storage.json` (see [`crate::storage`]). Falls back to the same
+    /// default 1280x960 geometry as [`WindowDimensionsMode::Default`] when
+    /// `storage.json` is missing or has no `window_state` recorded yet
+    /// (typical on first launch). The state file is updated on every
+    /// resize / move via a 1-second debounced save.
+    Inherit,
     Maximized,
     Fullscreen,
 }
@@ -282,6 +293,15 @@ mod tests {
         assert!(matches!(
             parsed,
             WindowDimensions::Mode(WindowDimensionsMode::Default)
+        ));
+    }
+
+    #[test]
+    fn window_dimensions_inherit_string() {
+        let parsed: WindowDimensions = serde_json::from_str(r#""inherit""#).unwrap();
+        assert!(matches!(
+            parsed,
+            WindowDimensions::Mode(WindowDimensionsMode::Inherit)
         ));
     }
 
