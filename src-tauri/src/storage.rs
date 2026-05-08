@@ -22,10 +22,9 @@
 //!   read-modify-write story without the read+rewrite race the JSON
 //!   implementation had.
 //!
-//! Schema: a single `storage` table with `(key TEXT PK, value TEXT,
-//! updated_at INTEGER)`. All values are JSON-serialised — keeps the row
-//! shape uniform regardless of slot, and `serde_json` is already in scope
-//! everywhere else.
+//! Schema: a single `storage` table with `(key TEXT PK, value TEXT)`. All
+//! values are JSON-serialised — keeps the row shape uniform regardless of
+//! slot, and `serde_json` is already in scope everywhere else.
 //!
 //! Concurrency: a process-wide `OnceLock<Mutex<Connection>>` serialises every
 //! read/write. SQLite's own busy-timeout / WAL would be enough for many
@@ -109,7 +108,7 @@ fn storage_path() -> PathBuf {
 /// (`CREATE TABLE IF NOT EXISTS`) — safe to call on every connection open.
 fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute(
-        "CREATE TABLE IF NOT EXISTS storage (\n            key TEXT PRIMARY KEY,\n            value TEXT NOT NULL,\n            updated_at INTEGER NOT NULL\n        )",
+        "CREATE TABLE IF NOT EXISTS storage (\n            key TEXT PRIMARY KEY,\n            value TEXT NOT NULL\n        )",
         [],
     )?;
     Ok(())
@@ -150,15 +149,6 @@ fn db() -> Option<&'static Mutex<Connection>> {
     DB.get()
 }
 
-/// Current Unix epoch seconds (i64). Returns 0 if the system clock is set
-/// before 1970 (effectively impossible — but avoids a panic).
-fn now_unix_seconds() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
 /// Read the raw JSON-encoded value for `key`. Returns `None` if the row
 /// doesn't exist, the lock is poisoned, the database can't be opened, or the
 /// query itself errors — every failure is folded into "missing", same
@@ -176,10 +166,9 @@ fn get_raw(conn: &Connection, key: &str) -> Option<String> {
 /// reason the JSON writer swallows them: persistence is a nice-to-have, not
 /// a correctness path.
 fn set_raw(conn: &Connection, key: &str, value: &str) {
-    let now = now_unix_seconds();
     let _ = conn.execute(
-        "INSERT INTO storage (key, value, updated_at) VALUES (?1, ?2, ?3)\n         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
-        params![key, value, now],
+        "INSERT INTO storage (key, value) VALUES (?1, ?2)\n         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![key, value],
     );
 }
 

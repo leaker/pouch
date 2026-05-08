@@ -513,9 +513,8 @@ Single VSCode-style key/value table:
 
 ```sql
 CREATE TABLE storage (
-    key        TEXT PRIMARY KEY,
-    value      TEXT NOT NULL,    -- JSON
-    updated_at INTEGER NOT NULL  -- Unix epoch seconds
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL    -- JSON
 );
 ```
 
@@ -543,7 +542,7 @@ CREATE TABLE storage (
 
 **Concurrency**: a process-wide mutex serialises every read/write, and SQLite's own crash-recovery (the database file is opened with default journaling) means an `EOPNOTSUPP` mid-write or a hard process kill doesn't corrupt the previously-committed rows.
 
-**Manual editing**: the file is a real SQLite database — open it with `sqlite3 storage.db` (or any SQLite GUI). Inspect with `SELECT key, value, datetime(updated_at, 'unixepoch') FROM storage;`; forget the last-session geometry with `DELETE FROM storage WHERE key='window_state';`; clear recent URLs with `DELETE FROM storage WHERE key='recent_urls';`. Deleting the entire file is also fine — the next launch recreates an empty database and falls back to defaults.
+**Manual editing**: the file is a real SQLite database — open it with `sqlite3 storage.db` (or any SQLite GUI). Inspect with `SELECT key, value FROM storage;`; forget the last-session geometry with `DELETE FROM storage WHERE key='window_state';`; clear recent URLs with `DELETE FROM storage WHERE key='recent_urls';`. Deleting the entire file is also fine — the next launch recreates an empty database and falls back to defaults.
 
 ## 6. JS injection
 
