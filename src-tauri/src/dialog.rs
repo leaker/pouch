@@ -2,7 +2,7 @@
 //! `NSComboBox` accessory view that asks the user for an http(s) URL and,
 //! on OK, opens it as an additional `WebviewWindow`. The combobox dropdown
 //! lists the user's recently submitted URLs (persisted by
-//! [`crate::recent_urls`]) so common destinations are one click away.
+//! [`crate::storage`]) so common destinations are one click away.
 //!
 //! Why a hand-rolled `NSAlert` instead of `tauri-plugin-dialog`:
 //!
@@ -175,7 +175,7 @@ pub fn show_new_window_dialog(app: &AppHandle) {
             // than the parsed `url::Url::to_string()` so the dropdown
             // reflects exactly what they typed (e.g. preserving the
             // trailing slash that `Url` would synthesise).
-            crate::recent_urls::add_recent_url(trimmed);
+            crate::storage::add_recent_url(trimmed);
         }
         Err(e) => {
             tracing::warn!(
@@ -252,7 +252,7 @@ fn prompt_url_via_alert(title: &str, info: &str) -> Option<String> {
         combobox.setNumberOfVisibleItems(COMBOBOX_VISIBLE_ITEMS);
 
         // Populate the dropdown with the persisted history (most-recent
-        // first — see `recent_urls::load_recent_urls`). Each
+        // first — see `storage::load_recent_urls`). Each
         // `addItemWithObjectValue:` call takes any `id` (Objective-C
         // object reference); we pass `NSString`s, the natural object value
         // for a URL-typed combobox. We hold the `NSString`s in a `Vec` so
@@ -263,7 +263,7 @@ fn prompt_url_via_alert(title: &str, info: &str) -> Option<String> {
         // the `Vec` could in principle drop before `runModal`; keeping it
         // until the end of the unsafe block is the conservatively-safe
         // choice and costs nothing.)
-        let recent = crate::recent_urls::load_recent_urls();
+        let recent = crate::storage::load_recent_urls();
         let _ns_recent: Vec<Retained<NSString>> = recent
             .iter()
             .map(|url| {
@@ -426,7 +426,7 @@ pub fn open_extra_window(
     }
 
     // Cross-platform: persist this extra window's resize / move events into
-    // `storage.json` for the next session's `inherit`-mode restore. Mirrors
+    // `storage.db` for the next session's `inherit`-mode restore. Mirrors
     // the main-window hookup in `lib.rs::create_main_window_with_url`.
     crate::install_window_state_listener(&window);
 

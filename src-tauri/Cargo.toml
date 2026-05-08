@@ -32,6 +32,10 @@ thiserror = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "chrono"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+# Embedded SQLite for unified state persistence (storage.db — window state +
+# recent URLs in a single KV table). `bundled` compiles SQLite C source into
+# the binary so we don't depend on the system libsqlite3 version (~700KB).
+rusqlite = { version = "0.31", features = ["bundled"] }
 
 # Windows-specific deps for the WebView2 native interceptor (phase H).
 # Versions aligned with what wry / tauri 2.x already pull in via the current

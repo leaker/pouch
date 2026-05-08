@@ -77,7 +77,7 @@ struct ConfigFile {
 ///   `DEFAULT_WINDOW_{WIDTH,HEIGHT}` (1280x960) baseline; not maximised, not
 ///   fullscreen.
 /// - `"inherit"`    → restore position / size / mode from the previous
-///   session (persisted in `storage.json` — see [`crate::storage`]); falls
+///   session (persisted in `storage.db` — see [`crate::storage`]); falls
 ///   back to the same default 1280x960 geometry as `"default"` on first
 ///   launch.
 /// - `"maximized"`  → fill the work area (excludes macOS menubar/dock or
@@ -100,11 +100,11 @@ pub enum WindowDimensions {
 pub enum WindowDimensionsMode {
     Default,
     /// Restore the last persisted window position / size / mode from
-    /// `storage.json` (see [`crate::storage`]). Falls back to the same
+    /// `storage.db` (see [`crate::storage`]). Falls back to the same
     /// default 1280x960 geometry as [`WindowDimensionsMode::Default`] when
-    /// `storage.json` is missing or has no `window_state` recorded yet
-    /// (typical on first launch). The state file is updated on every
-    /// resize / move via a 1-second debounced save.
+    /// `storage.db` is missing or has no `window_state` row recorded yet
+    /// (typical on first launch). The row is updated on every resize /
+    /// move via a 1-second debounced save.
     Inherit,
     Maximized,
     Fullscreen,

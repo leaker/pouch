@@ -30,8 +30,16 @@ dist/
 overrides/*
 !overrides/.gitkeep
 
-# Runtime-generated recent URLs list (dev build writes it next to the repo
-# root via the user-data resolver chain).
+# Runtime-generated state files (dev build writes them next to the repo
+# root via the user-data resolver chain). `storage.db` is the current
+# unified state database; the JSON files are legacy dead-files left over
+# from before the SQLite migration and ignored so stale dev copies never
+# accidentally get committed.
+storage.db
+storage.db-journal
+storage.db-wal
+storage.db-shm
+storage.json
 recent_urls.json
 
 # OS / editor

@@ -120,7 +120,7 @@ The DevTools button doubles as a state indicator: it shows the outlined `wrench.
 Pouch runs as a single process and supports multiple `WebviewWindow`s sharing the same WebKit data store, so cookies, `localStorage`, and the disk cache are shared across windows. There are two ways to open extra windows:
 
 1. **`startup_urls` array in `hook.config.json`** — the first entry becomes the main window; every subsequent entry is opened as its own additional window when Pouch launches. See §4.1 for the schema.
-2. **`File → New Window` (`Cmd+N`)** — pops a native `NSAlert` (titled with a `globe` SF Symbol icon) whose accessory view is a wide `NSComboBox`: type a URL or pick from the dropdown of recently-used destinations. Pressing Return (or clicking *Open*) opens that URL as an additional window. Escape / Cancel / non-http(s) input is a quiet no-op. Recent URLs are persisted across launches in `recent_urls.json` next to `hook.config.json`, and the field starts empty so a fresh paste is unobstructed.
+2. **`File → New Window` (`Cmd+N`)** — pops a native `NSAlert` (titled with a `globe` SF Symbol icon) whose accessory view is a wide `NSComboBox`: type a URL or pick from the dropdown of recently-used destinations. Pressing Return (or clicking *Open*) opens that URL as an additional window. Escape / Cancel / non-http(s) input is a quiet no-op. Recent URLs are persisted across launches in `storage.db` (the `recent_urls` row, see §5.5) next to `hook.config.json`, and the field starts empty so a fresh paste is unobstructed.
 
 Each window gets its own titlebar accessory (Reveal / Reload / Toggle DevTools). The DevTools button is per-window — clicking the button or pressing F12 toggles DevTools on the focused window only — while the Reveal Folder button is process-global and the Reload button still restarts the whole application (so all windows close and reopen with the freshly-read config).
 
@@ -296,7 +296,7 @@ Fields:
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `startup_urls` | array of strings (each `http://` or `https://`) | No (missing/`null`/`[]` = prompt the user via NSAlert at startup; Cancel exits — see §2.6 / §4.2) | URLs to open at launch. The first valid entry becomes the main `WebviewWindow` (`label = "main"`, `WebviewUrl::External(url)`); every subsequent entry opens as its own extra window with shared cookies / cache and an independent webview lifecycle. Non-http(s) entries are dropped with a `warn` log. See §2.6. |
-| `window_dimensions` | `"default"` \| `"inherit"` \| `"maximized"` \| `"fullscreen"` \| `{ "width": <px>, "height": <px> }` | No (default `"maximized"`) | Initial window dimensions applied at launch (uniformly to the main window and every extra window). VSCode-style naming. `"inherit"` restores from `storage.json` — see §5.5. See §4.4. |
+| `window_dimensions` | `"default"` \| `"inherit"` \| `"maximized"` \| `"fullscreen"` \| `{ "width": <px>, "height": <px> }` | No (default `"maximized"`) | Initial window dimensions applied at launch (uniformly to the main window and every extra window). VSCode-style naming. `"inherit"` restores from `storage.db` — see §5.5. See §4.4. |
 | `ignore_urls` | array of entries (one of `suffix` / `wildcard` / `url_wildcard` / `url_regex`, plus optional `comment`) | No (missing/`null`/`[]` = no filtering) | Per-entry blacklist; matched URLs are fetched but never cached. See §4.3 for the four entry shapes. |
 
 > **Schema break in v1.1**: the previous fields `target_url` (single string) and `windows` (array) have been **unified into the single `startup_urls` array**. There is no deprecation alias — users upgrading from v1.0.x must edit `hook.config.json` by hand. The `TAURI_HOOK_TARGET_URL` environment variable and the `argv[1]` URL override have also been removed in the same change (everything goes through `startup_urls` now).
@@ -361,7 +361,7 @@ Controls the initial window dimensions. VSCode-style naming for clarity — the 
 | Value | Behaviour |
 |---|---|
 | `"default"` | Ordinary floating window at the `DEFAULT_WINDOW_{WIDTH,HEIGHT}` (1280x960) baseline; not maximised, not fullscreen. Useful when the user wants to position / resize the window manually. |
-| `"inherit"` | Restore the window's position, size, and mode (maximised / fullscreen) from the previous session. State is persisted in `storage.json` (see §5.5) — every Resize / Move gesture writes the new geometry after a 1-second debounce. Falls back to `"default"`'s 1280x960 geometry on first launch (when no state has been recorded yet). |
+| `"inherit"` | Restore the window's position, size, and mode (maximised / fullscreen) from the previous session. State is persisted in `storage.db` (see §5.5) — every Resize / Move gesture writes the new geometry after a 1-second debounce. Falls back to `"default"`'s 1280x960 geometry on first launch (when no state has been recorded yet). |
 | `"maximized"` (**default**) | Fills the work area — excludes the macOS menubar / dock and the Windows taskbar. Implemented via Tauri's `WebviewWindowBuilder::maximized(true)`, which the underlying wry layer forwards to `NSWindow.zoom:` on macOS and `ShowWindow(SW_MAXIMIZE)` on Windows so the OS work area is honoured natively. |
 | `"fullscreen"` | Real fullscreen via `WebviewWindowBuilder::fullscreen(true)` — hides window chrome (title bar, traffic lights, taskbar). |
 | `{ "width": <px>, "height": <px> }` | Fixed logical-pixel inner size via `WebviewWindowBuilder::inner_size(width, height)`. Logical pixels are DPR-independent (a `1280` here is the same physical width on a Retina display as on a non-Retina one). |
@@ -503,24 +503,28 @@ Clear everything: `rm -rf overrides/* && touch overrides/.gitkeep`.
 
 Pouch **does not expose** IPC `clear_*` commands — there is no frontend trampoline page and no IPC bridge. If you need programmatic cache clearing at runtime, re-attach `#[tauri::command]` and a capability to `cache_store`'s `clear_url` / `clear_host` / `clear_all` helpers in your fork, or simply rely on "delete `overrides/` and restart the webview".
 
-### 5.5 `storage.json` (window-state persistence)
+### 5.5 `storage.db` (unified state persistence)
 
 Source: [`src-tauri/src/storage.rs`](src-tauri/src/storage.rs)
 
-`storage.json` lives **alongside** `hook.config.json` (same parent directory — i.e. `<repo>/storage.json` in dev, `~/Library/Application Support/Pouch/storage.json` on macOS release, `<exe parent>/storage.json` on Windows / Linux release). It records the most-recent window geometry so `window_dimensions: "inherit"` can restore where the user left off on the next launch.
+`storage.db` is a small SQLite database that lives **alongside** `hook.config.json` (same parent directory — i.e. `<repo>/storage.db` in dev, `~/Library/Application Support/Pouch/storage.db` on macOS release, `<exe parent>/storage.db` on Windows / Linux release). It is the single durable home for every cross-session state slot Pouch maintains — currently the most-recent window geometry (so `window_dimensions: "inherit"` can restore where the user left off) and the macOS Cmd+N recent-URLs history (so the dropdown survives relaunches). Future state slots drop into the same table without inventing another file.
 
-```json
-{
-  "window_state": {
-    "x": 120,
-    "y": 80,
-    "width": 1280,
-    "height": 960,
-    "maximized": false,
-    "fullscreen": false
-  }
-}
+Single VSCode-style key/value table:
+
+```sql
+CREATE TABLE storage (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,    -- JSON
+    updated_at INTEGER NOT NULL  -- Unix epoch seconds
+);
 ```
+
+| Key | Value JSON shape | Written by |
+|---|---|---|
+| `window_state` | `{ "x": i32, "y": i32, "width": u32, "height": u32, "maximized": bool, "fullscreen": bool }` | every debounced `Resized` / `Moved` window event (see "Write timing" below) |
+| `recent_urls` | `["https://…", "https://…", …]` (most-recent first, capped at 20) | Cmd+N "New Window" prompt on a successful URL submission (macOS only) |
+
+`window_state` field meanings:
 
 | Field | Type | Description |
 |---|---|---|
@@ -529,13 +533,17 @@ Source: [`src-tauri/src/storage.rs`](src-tauri/src/storage.rs)
 | `maximized` | bool | Whether the window was maximised when last saved. |
 | `fullscreen` | bool | Whether the window was in real fullscreen when last saved. |
 
-**Write timing**: every `Resized` / `Moved` window event schedules a write 1 second later. Within the 1-second window, every additional event resets the timer (debounce), so a multi-event drag-resize burst collapses to one disk write after the gesture quiesces — the file is **never** updated mid-drag.
+**Write timing** (`window_state`): every `Resized` / `Moved` window event schedules a write 1 second later. Within the 1-second window, every additional event resets the timer (debounce), so a multi-event drag-resize burst collapses to one row update after the gesture quiesces — the database is **never** updated mid-drag. Updates are single-row UPSERTs (`INSERT … ON CONFLICT(key) DO UPDATE`), so unrelated rows (e.g. `recent_urls`) are never touched by a window-state save.
 
-**Multi-window**: there is one `window_state` slot shared across every Pouch window (main + extras from `startup_urls` + Cmd+N). When several windows are alive, the saved state reflects whichever window most recently fired the latest event in the burst. This is intentional — the contract is "open the next session at the last-known geometry", not "track every window separately".
+**Multi-window**: there is one `window_state` row shared across every Pouch window (main + extras from `startup_urls` + Cmd+N). When several windows are alive, the saved state reflects whichever window most recently fired the latest event in the burst. This is intentional — the contract is "open the next session at the last-known geometry", not "track every window separately".
 
-**First launch / corrupt file**: missing file, malformed JSON, or `window_state: null` all resolve to the `"default"` mode geometry (1280x960, not maximised, not fullscreen) — the loader silently starts fresh rather than panicking, since window-state persistence is a UX nicety, never a correctness path.
+**Recent URLs** (`recent_urls`, macOS only): on a successful Cmd+N URL submission, the entry is prepended to the list, any earlier identical entry is removed (so the dropdown never shows duplicates), and the list is truncated to 20 entries before the row is rewritten. Empty / whitespace-only inputs are ignored. Failed window builds don't write — the dropdown only ever surfaces URLs that successfully opened a window.
 
-**Manual editing**: the file is plain JSON — edit / delete it with any text editor (e.g. delete it to forget the last-session geometry; the next launch then opens at the 1280x960 default).
+**First launch / corrupt database**: missing file, missing row, malformed JSON, or an unwritable user-data dir all resolve to the same fall-back behaviour as the previous JSON implementation — `window_state` becomes the `"default"` mode geometry (1280x960, not maximised, not fullscreen) and `recent_urls` becomes an empty list. The loader silently starts fresh rather than panicking, since state persistence is a UX nicety, never a correctness path.
+
+**Concurrency**: a process-wide mutex serialises every read/write, and SQLite's own crash-recovery (the database file is opened with default journaling) means an `EOPNOTSUPP` mid-write or a hard process kill doesn't corrupt the previously-committed rows.
+
+**Manual editing**: the file is a real SQLite database — open it with `sqlite3 storage.db` (or any SQLite GUI). Inspect with `SELECT key, value, datetime(updated_at, 'unixepoch') FROM storage;`; forget the last-session geometry with `DELETE FROM storage WHERE key='window_state';`; clear recent URLs with `DELETE FROM storage WHERE key='recent_urls';`. Deleting the entire file is also fine — the next launch recreates an empty database and falls back to defaults.
 
 ## 6. JS injection
 

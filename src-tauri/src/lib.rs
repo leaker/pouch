@@ -32,8 +32,6 @@ pub mod dialog;
 pub mod hook;
 pub mod http_fetcher;
 pub mod inject;
-#[cfg(target_os = "macos")]
-mod recent_urls;
 pub mod storage;
 #[cfg(target_os = "macos")]
 mod titlebar;
@@ -679,7 +677,7 @@ fn create_main_window_with_url(
     }
 
     // Cross-platform: attach the resize/move debounced state-saver so any
-    // window-shape change ends up persisted in `storage.json` for the next
+    // window-shape change ends up persisted in `storage.db` for the next
     // session's `window_dimensions: "inherit"` restore.
     install_window_state_listener(&main_window);
 
@@ -687,12 +685,12 @@ fn create_main_window_with_url(
 }
 
 /// Apply `WindowDimensions::Mode(Inherit)` to a `WebviewWindowBuilder`:
-/// load the persisted [`storage::WindowState`] from `storage.json` and
+/// load the persisted [`storage::WindowState`] from `storage.db` and
 /// re-apply its position / size / maximised / fullscreen mode. Falls back to
 /// the `Default` mode geometry (1280x960, not maximised, not fullscreen)
 /// when no state has been recorded yet — typical on first launch, also the
-/// path taken when `storage.json` is corrupt or unreadable (see
-/// [`storage::load_storage`] failure-mode contract).
+/// path taken when `storage.db` is corrupt or unreadable (see
+/// [`storage::load_window_state`] failure-mode contract).
 ///
 /// Shared by the main-window builder in `create_main_window_with_url` and
 /// the extra-window builder in [`crate::dialog::open_extra_window`] so both
@@ -704,7 +702,7 @@ fn create_main_window_with_url(
 pub(crate) fn apply_inherit_mode<R: tauri::Runtime, M: Manager<R>>(
     builder: WebviewWindowBuilder<'_, R, M>,
 ) -> WebviewWindowBuilder<'_, R, M> {
-    match storage::load_storage().window_state {
+    match storage::load_window_state() {
         Some(state) if state.width > 0 && state.height > 0 => builder
             .position(f64::from(state.x), f64::from(state.y))
             .inner_size(f64::from(state.width), f64::from(state.height))
@@ -742,7 +740,7 @@ static SAVE_VERSION: AtomicU64 = AtomicU64::new(0);
 const SAVE_DEBOUNCE: Duration = Duration::from_secs(1);
 
 /// Hook the per-window resize / move events so the geometry ends up
-/// persisted in `storage.json` for the next session's
+/// persisted in `storage.db` for the next session's
 /// `window_dimensions: "inherit"` restore. Cross-platform — runs on every
 /// platform, not just macOS — so Windows / Linux users also benefit from
 /// the inherit mode.
