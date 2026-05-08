@@ -1,3 +1,6 @@
+[![Build](https://github.com/leaker/pouch/actions/workflows/build.yml/badge.svg?branch=main)](https://github.com/leaker/pouch/actions/workflows/build.yml?query=branch%3Amain)
+[![License](https://img.shields.io/github/license/leaker/pouch)](LICENSE)
+
 # Pouch
 
 > Tuck any web app into a local-first desktop pouch.
@@ -38,7 +41,13 @@ In short: Pouch delivers equivalent capability with a smaller binary plus the sy
 
 ### 2.2 Configure the target URL
 
-Edit `hook.config.json` at the repository root:
+Edit `hook.config.json` — its location depends on whether you are running a dev tree or a packaged release build (full resolution chain in §4.2):
+
+| Build | Path |
+|---|---|
+| **dev tree** (`bun run tauri dev`, running from a clone) | `<repo>/hook.config.json` |
+| **macOS release** (`Pouch.app` from the .dmg) | `~/Library/Application Support/Pouch/hook.config.json` |
+| **Windows release** (portable `.exe` / `.zip`) | next to `pouch.exe` |
 
 ```json
 {
@@ -47,6 +56,8 @@ Edit `hook.config.json` at the repository root:
 ```
 
 Set `target_url` to the site you want to hook. This is the **default and recommended** way to configure Pouch; other override channels are described in the priority chain in §4.2.
+
+> **macOS first launch**: when you double-click `Pouch.app` for the first time, the directory `~/Library/Application Support/Pouch/` does not yet exist. Pouch detects this and seeds it with a copy of the sample `hook.config.json` and `inject/*.js` shipped inside the .app bundle (`Contents/Resources/sample/`). Edit those files freely afterwards — Pouch only seeds the directory on first launch and never overwrites your edits. To reset, delete the directory and relaunch.
 
 ### 2.3 Install and launch
 
@@ -103,6 +114,12 @@ TAURI_HOOK_LOG=hook=debug bun run tauri dev
 The Web Inspector is enabled in both debug and release builds (Pouch is a hook-debugging tool, so devtools always-on is the right default — wired via the `devtools` feature flag on the `tauri` crate).
 
 Press `F12` (or `View → Open DevTools` menu item) to open DevTools. Works on both macOS and Windows.
+
+On macOS the right side of the titlebar carries three SF Symbol buttons mirroring the most-used `View` menu entries: `folder` (Reveal Pouch Folder in Finder, Cmd+Shift+O), `arrow.clockwise` (Reload from Config, Cmd+R), and `wrench.and.screwdriver` (Toggle DevTools, F12). Each button has a hover tooltip showing its keyboard shortcut.
+
+The DevTools button doubles as a state indicator: it shows the outlined `wrench.and.screwdriver` glyph while the inspector is closed and swaps to the filled `wrench.and.screwdriver.fill` glyph while it is open. All three triggers (the titlebar button, F12, and the `View → Open DevTools` menu item) keep the icon in sync — pressing F12 or clicking the menu item flips the icon along with the inspector's visibility.
+
+> **Reload behaviour**: The Reload button (Cmd+R) restarts the application to apply changes to `hook.config.json` and `inject/*.js`. This is implemented as a clean process restart (`app.restart()`) for predictable behavior.
 
 ## 3. How it works
 
@@ -221,7 +238,13 @@ Changes to the webview's `document.title` (including SPA route changes where the
 
 ## 4. Configuration
 
-### 4.1 `hook.config.json` (repository root)
+### 4.1 `hook.config.json`
+
+Resolved location depends on the build (see §2.2 for the table):
+
+- **dev**: `<repo>/hook.config.json`
+- **macOS release**: `~/Library/Application Support/Pouch/hook.config.json` (seeded on first launch from the .app bundle's `Contents/Resources/sample/`)
+- **Windows release**: next to `pouch.exe`
 
 The shipped [`hook.config.json`](hook.config.json) sets `target_url` plus a starter `ignore_urls` list demonstrating all four entry shapes (see §4.3 for the full schema):
 
@@ -256,7 +279,7 @@ Source: [`src-tauri/src/config.rs`](src-tauri/src/config.rs)
 
 1. **CLI argv[1]**: only useful for release binaries, e.g. `./pouch https://example.com/`. Must start with `http://` or `https://`
 2. **Environment variable `TAURI_HOOK_TARGET_URL`**: same http(s) requirement; otherwise warn and skip
-3. **`hook.config.json`**: in dev mode, `<CARGO_MANIFEST_DIR>/../hook.config.json` (the repo root); in prod mode, first the binary's directory, then cwd
+3. **`hook.config.json`**: in dev mode, `<CARGO_MANIFEST_DIR>/../hook.config.json` (the repo root); in macOS release mode, `~/Library/Application Support/Pouch/hook.config.json` (seeded from `Pouch.app/Contents/Resources/sample/` on first launch); in Windows release mode, next to `pouch.exe`; cwd is consulted as a last-ditch fallback in every mode
 4. **Built-in default fallback**: `https://www.leelib.com`
 
 Each successful step prints an INFO log, e.g.:
@@ -368,7 +391,13 @@ INFO hook: HIT key=www.leelib.com/css/fika.min.xxx.css bytes=30007
 
 ## 5. Cache directory layout
 
-Cache root = `overrides/` at the repo root (i.e. `<repo>/overrides/`, sibling to `src-tauri/`). The first call to `cache_store::cache_root()` on the Rust side will `mkdir -p` on demand and emit a `tracing::info!` line to stdout.
+Cache root resolves the same way as `hook.config.json` (see §2.2 / §4.2):
+
+- **dev**: `<repo>/overrides/`
+- **macOS release**: `~/Library/Application Support/Pouch/overrides/`
+- **Windows release**: `overrides/` next to `pouch.exe`
+
+The first call to `cache_store::cache_root()` on the Rust side will `mkdir -p` on demand and emit a `tracing::info!` line to stdout.
 
 ```
 overrides/
@@ -440,7 +469,7 @@ Pouch **does not expose** IPC `clear_*` commands — there is no frontend trampo
 
 Source: [`src-tauri/src/inject.rs`](src-tauri/src/inject.rs)
 
-Pouch supports a Tampermonkey-style "inject on URL match" mechanism: drop any `*.js` file into the repo's `inject/` directory and at startup the file's frontmatter is parsed and assembled into a dispatcher that is injected into the main webview as `initialization_script`. On every top-level navigation the dispatcher decides which rules to trigger based on `location.href`, and each matching rule executes inside its own function scope.
+Pouch supports a Tampermonkey-style "inject on URL match" mechanism: drop any `*.js` file into the `inject/` directory (resolved the same way as `hook.config.json` — see §2.2: repo root in dev, `~/Library/Application Support/Pouch/inject/` on macOS release, next to `pouch.exe` on Windows release) and at startup the file's frontmatter is parsed and assembled into a dispatcher that is injected into the main webview as `initialization_script`. On every top-level navigation the dispatcher decides which rules to trigger based on `location.href`, and each matching rule executes inside its own function scope.
 
 Pouch ships two demos ([`inject/global.js`](inject/global.js), [`inject/leelib.js`](inject/leelib.js)) showing two typical patterns — "console output on every URL" and "banner injection on a specific site" — that you can edit or remove freely.
 
