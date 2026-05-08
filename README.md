@@ -268,7 +268,7 @@ The shipped [`hook.config.json`](hook.config.json) sets `target_url` plus a star
     { "suffix": "google-analytics.com", "comment": "GA reporting endpoint" },
     { "suffix": "cdn.jsdelivr.net",     "comment": "Public npm CDN" },
     { "wildcard": "*.google.com",       "comment": "Example: matches google.com subdomains only (e.g. fonts.google.com / mail.google.com), apex excluded" },
-    { "url_wildcard": "https://ipecho.io/*", "comment": "Example: URL glob, * does not cross /" },
+    { "url_wildcard": "https://ipecho.io/*", "comment": "Example: URL glob, * matches any characters" },
     { "url_regex": "^https://example\\.com/track/.*", "comment": "Example: full-URL regex, caller controls anchors" }
   ]
 }
@@ -319,7 +319,7 @@ Rules are loaded entirely from `hook.config.json`'s optional `ignore_urls` array
     { "suffix": "google-analytics.com", "comment": "GA reporting endpoint" },
     { "suffix": "cdn.jsdelivr.net",     "comment": "Public npm CDN" },
     { "wildcard": "*.google.com",       "comment": "google.com subdomains only (apex excluded)" },
-    { "url_wildcard": "https://example.com/api/*", "comment": "URL glob; * does not cross /" },
+    { "url_wildcard": "https://example.com/api/*", "comment": "URL glob; * matches any characters" },
     { "url_regex": "^https://example\\.com/track/.*", "comment": "full-URL regex; caller controls anchors" }
   ]
 }
@@ -331,7 +331,7 @@ Each entry has **exactly one** of the following four keys — the field name *is
 |----------------|--------------|------------------------------------------------------------------------------------------------------------------------------------------|
 | `suffix`       | host         | Host suffix, **apex included**. `gstatic.com` matches both `gstatic.com` and `fonts.gstatic.com` (but not `notgstatic.com`).             |
 | `wildcard`     | host         | Host glob; `*` matches a single label segment and **does not cross `.`**. `*.google.com` matches `fonts.google.com` but **not** `google.com` itself — write a separate `suffix` entry if you need the apex. `ads.*.com` matches `ads.foo.com` but not `ads.foo.bar.com`. |
-| `url_wildcard` | full URL     | URL glob; `*` matches a non-`/` run and **does not cross `/`**. All other regex meta is escaped. Auto-anchored at both ends.             |
+| `url_wildcard` | full URL     | URL glob; `*` matches **any characters (including `/`)**. All other regex meta is escaped. Auto-anchored at both ends.                   |
 | `url_regex`    | full URL     | Raw `regex::Regex` against the full URL. **Not** auto-anchored — the caller controls `^` / `$`.                                          |
 
 Host comparisons parse the URL via the `url` crate, so scheme / port / path / IPv6 brackets are handled correctly. Individual entries that fail to compile (invalid regex, empty / blank value) are warned and skipped without aborting the rest of the list. An entry that omits all four keys, supplies more than one, or uses an unknown key fails JSON parsing for the whole `ignore_urls` array — the loader then warns and falls through with no rules installed.

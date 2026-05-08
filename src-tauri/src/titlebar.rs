@@ -49,7 +49,7 @@ use objc2_app_kit::{
     NSButton, NSImage, NSLayoutAttribute, NSTitlebarAccessoryViewController, NSView, NSWindow,
 };
 use objc2_foundation::{ns_string, MainThreadMarker, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, WindowEvent};
 
 use crate::util::reveal_pouch_folder;
 
@@ -441,6 +441,32 @@ pub fn update_devtools_button_image(label: &str, is_open: bool) {
     });
 }
 
+/// Drop the per-window `ButtonHandler` and `NSButton` retains we keep in the
+/// thread-local maps for `label`. Called from `lib.rs`'s
+/// `WindowEvent::Destroyed` listener so closing a window (Cmd+W / red traffic
+/// light / `WebviewWindow::close`) actually releases our extra retains and
+/// lets Cocoa's autorelease pool reclaim the accessory chain on the same run
+/// loop tick — leaving the `Retained<NSButton>` in the map appears to delay /
+/// stall the AppKit close path on multi-window builds, which surfaces as a
+/// hang on Cmd+W.
+///
+/// Safe to call from any thread (the underlying `thread_local!`s are only
+/// ever populated and read on the AppKit main thread, and this function is
+/// expected to run on the main thread because Tauri's `on_window_event`
+/// dispatches to the main thread on macOS — see Tauri v2 source). A miss
+/// (label not in map) is a silent no-op so re-firing on a label that was
+/// never installed (SF Symbol unavailable on macOS < 11) doesn't panic.
+pub fn cleanup_window_accessory(label: &str) {
+    tracing::debug!(target: "hook", "[titlebar] cleanup start label={}", label);
+    HANDLERS.with(|cell| {
+        cell.borrow_mut().remove(label);
+    });
+    DEVTOOLS_BUTTONS.with(|cell| {
+        cell.borrow_mut().remove(label);
+    });
+    tracing::debug!(target: "hook", "[titlebar] cleanup done label={}", label);
+}
+
 /// Public entry point used by `lib.rs::setup` and the New Window dialog.
 /// Resolves the NSWindow handle from the Tauri webview window, stashes the
 /// AppHandle for the reload / devtools button actions on first call, and
@@ -450,6 +476,11 @@ pub fn install_titlebar_accessory(
     app: &AppHandle,
     window: &tauri::WebviewWindow,
 ) -> tauri::Result<()> {
+    tracing::debug!(
+        target: "hook",
+        "[titlebar] install start label={}",
+        window.label()
+    );
     let mtm = MainThreadMarker::new()
         .expect("install_titlebar_accessory must be called on the main thread");
 
@@ -466,5 +497,38 @@ pub fn install_titlebar_accessory(
     // SAFETY: Tauri's contract on `ns_window()` returns a valid autoreleased
     // NSWindow pointer; we borrow it without taking ownership.
     unsafe { install_on_ns_window(ns_window, mtm, &label) };
+
+    // Wire `WindowEvent::Destroyed` to drop the per-window retains we just
+    // stashed in the thread-local maps. Without this, closing a non-final
+    // window via Cmd+W (PredefinedMenuItem::close_window → -[NSWindow
+    // performClose:]) leaves `Retained<ButtonHandler>` and
+    // `Retained<NSButton>` pinning the accessory chain, which appears to
+    // stall the AppKit close path on multi-window builds — observable as a
+    // hang where the window decorations don't disappear and subsequent
+    // input is dropped. Registering inside `install_titlebar_accessory`
+    // means every accessory-bearing window (main + startup `windows[]` +
+    // Cmd+N) gets the cleanup automatically — no extra call site needed.
+    let cleanup_label = label.clone();
+    window.on_window_event(move |event| {
+        // Trace EVERY window event (CloseRequested, Focused, Destroyed, ...).
+        // The wry `WindowEvent` Debug impl is sufficient for distinguishing
+        // close-path stages (`CloseRequested` → `Destroyed`) when diagnosing
+        // hangs reported during Cmd+W; keep at trace level so a normal `info`
+        // run isn't deafened by Focused / Resized chatter.
+        tracing::trace!(
+            target: "hook",
+            "[window:{cleanup_label}] event={:?}",
+            event
+        );
+        if matches!(event, WindowEvent::Destroyed) {
+            tracing::debug!(
+                target: "hook",
+                "[window:{cleanup_label}] Destroyed -> cleanup_window_accessory"
+            );
+            cleanup_window_accessory(&cleanup_label);
+        }
+    });
+
+    tracing::debug!(target: "hook", "[titlebar] install done label={}", label);
     Ok(())
 }

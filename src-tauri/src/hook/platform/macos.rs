@@ -61,7 +61,7 @@ use objc2_foundation::{
     NSURLCacheStoragePolicy, NSURLProtocol, NSURLProtocolClient, NSURLRequest,
 };
 use tokio::runtime::Runtime;
-use tracing::{debug, warn};
+use tracing::{debug, trace, warn};
 
 use crate::hook::policy::{self, Decision};
 
@@ -177,6 +177,11 @@ define_class!(
                 Some(u) => u,
                 None => return Bool::NO,
             };
+            let url_for_log = url
+                .absoluteString()
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+            trace!(target: "hook", "[mac] canInit url={}", short_url(&url_for_log));
             let scheme = match url.scheme() {
                 Some(s) => s.to_string().to_lowercase(),
                 None => return Bool::NO,
@@ -246,6 +251,8 @@ define_class!(
                 }
             };
 
+            debug!(target: "hook", "[mac] startLoading url={}", short_url(&url_str));
+
             let header_map = match nsdict_to_header_map(request.allHTTPHeaderFields().as_deref()) {
                 Ok(h) => h,
                 Err(e) => {
@@ -261,14 +268,26 @@ define_class!(
             // `client()` from main) this is sound.
             let self_retained: Retained<HookURLProtocol> = self.retain();
 
+            let url_short = short_url(&url_str);
+            trace!(target: "hook", "[mac] spawn task url={}", url_short);
+            let started = std::time::Instant::now();
             rt().spawn(async move {
                 let decision = policy::evaluate(&url_str, &header_map).await;
 
                 // Hop back to main before touching the NSURLProtocolClient.
                 // `exec_async` requires `Send + 'static`; `Retained` and the
                 // owned `Decision` satisfy that.
+                let url_short_hop = short_url(&url_str);
+                trace!(target: "hook", "[mac] main_hop_enter url={}", url_short_hop);
                 DispatchQueue::main().exec_async(move || {
+                    trace!(target: "hook", "[mac] main_hop_exit url={}", short_url(&url_str));
                     deliver(&self_retained, &url_str, decision);
+                    trace!(
+                        target: "hook",
+                        "[mac] task done url={} duration_ms={}",
+                        short_url(&url_str),
+                        started.elapsed().as_millis()
+                    );
                 });
             });
         }
@@ -276,7 +295,24 @@ define_class!(
         /// `-stopLoading` — see module docs ("Known simplifications").
         #[unsafe(method(stopLoading))]
         fn stop_loading(&self) {
-            debug!(target: "hook", "[hook][mac] stopLoading (no-op; in-flight policy continues to completion)");
+            // Capture the URL we were loading so the log line is correlated
+            // with the matching `startLoading` entry. `request().URL()` is
+            // documented as non-null for an active load (NSURLProtocol's
+            // initWithRequest: stores it), but we still defer to a
+            // `<unknown>` fallback in case the runtime invariant is somehow
+            // violated mid-teardown — failing the log line is worse than
+            // failing soft.
+            let url_for_log = self
+                .request()
+                .URL()
+                .and_then(|u| u.absoluteString())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "<unknown>".to_string());
+            debug!(
+                target: "hook",
+                "[mac] stopLoading url={} (no-op; in-flight policy continues to completion)",
+                short_url(&url_for_log)
+            );
         }
     }
 );
@@ -347,6 +383,12 @@ fn deliver_respond(
     content_type: Option<String>,
     extra_headers: &[(String, String)],
 ) -> Result<(), String> {
+    trace!(
+        target: "hook",
+        "[mac] deliver_respond url={} body_len={}",
+        short_url(url),
+        body.len()
+    );
     let url_ns = make_nsurl(url).ok_or_else(|| format!("invalid URL: {url}"))?;
 
     let header_dict = build_response_header_dict(content_type.as_deref(), body.len(), extra_headers);
@@ -486,6 +528,22 @@ fn build_response_header_dict(
 fn make_nsurl(url: &str) -> Option<Retained<objc2_foundation::NSURL>> {
     let s = NSString::from_str(url);
     objc2_foundation::NSURL::URLWithString(&s)
+}
+
+/// Truncate `url` to ~60 chars for log lines so trace spam stays scannable.
+/// Adds `...` when clipped; never panics on multi-byte boundaries (we slice
+/// on `char_indices` rather than raw byte indices).
+fn short_url(url: &str) -> String {
+    const MAX: usize = 60;
+    if url.chars().count() <= MAX {
+        return url.to_string();
+    }
+    let cut = url
+        .char_indices()
+        .nth(MAX)
+        .map(|(i, _)| i)
+        .unwrap_or(url.len());
+    format!("{}...", &url[..cut])
 }
 
 /// Returns true if `host` (already lower-cased) refers to the local machine.

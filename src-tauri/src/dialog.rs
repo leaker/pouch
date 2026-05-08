@@ -218,10 +218,6 @@ fn prompt_url_via_alert() -> Option<String> {
         );
         let combobox: Retained<NSComboBox> =
             NSComboBox::initWithFrame(NSComboBox::alloc(mtm), field_frame);
-        // Pre-fill with `https://` so the user starts past the scheme —
-        // saves a few keystrokes and visually documents the http(s)-only
-        // contract. `setStringValue:` is inherited from `NSTextField`.
-        combobox.setStringValue(ns_string!("https://"));
         combobox.setNumberOfVisibleItems(COMBOBOX_VISIBLE_ITEMS);
 
         // Populate the dropdown with the persisted history (most-recent
@@ -298,6 +294,7 @@ pub fn open_extra_window(
     url: url::Url,
     window_config: WindowConfig,
 ) -> tauri::Result<tauri::WebviewWindow> {
+    let url_for_log = url.to_string();
     let mut builder = WebviewWindowBuilder::new(app, label, WebviewUrl::External(url))
         .resizable(true)
         .devtools(true)
@@ -348,6 +345,12 @@ pub fn open_extra_window(
     };
 
     let window = builder.build()?;
+    tracing::debug!(
+        target: "hook",
+        "[window] created label={} url={}",
+        label,
+        url_for_log
+    );
 
     #[cfg(target_os = "macos")]
     {

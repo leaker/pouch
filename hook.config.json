@@ -7,7 +7,7 @@
     { "suffix": "google-analytics.com", "comment": "GA reporting endpoint" },
     { "suffix": "cdn.jsdelivr.net",     "comment": "Public npm CDN" },
     { "wildcard": "*.google.com",       "comment": "Example: matches google.com subdomains only (e.g. fonts.google.com / mail.google.com), apex excluded" },
-    { "url_wildcard": "https://ipecho.io/*", "comment": "Example: URL glob, * does not cross /" },
+    { "url_wildcard": "https://ipecho.io/*", "comment": "Example: URL glob, * matches any characters" },
     { "url_regex": "^https://example\\.com/track/.*", "comment": "Example: full-URL regex, caller controls anchors" }
   ]
 }

@@ -21,7 +21,7 @@
 //! |------------------|--------------|------------------------------------------------------------------------------------|
 //! | `suffix`         | host         | Host suffix, includes the apex itself plus any subdomain (`gstatic.com` matches `gstatic.com` and `fonts.gstatic.com`). |
 //! | `wildcard`       | host         | Host glob; `*` matches a single label segment (does **not** cross `.`). `*.google.com` matches `fonts.google.com` but not `google.com`. |
-//! | `url_wildcard`   | full URL     | URL glob; `*` matches non-`/` runs (does **not** cross `/`). All other regex meta is escaped. Auto-anchored.       |
+//! | `url_wildcard`   | full URL     | URL glob; `*` matches any characters (including `/`). All other regex meta is escaped. Auto-anchored.              |
 //! | `url_regex`      | full URL     | Raw `regex::Regex` against the full URL. **Not** auto-anchored — caller controls `^` / `$`.                        |
 //!
 //! `comment` is documentation-only and unused at runtime. Host comparisons
@@ -83,7 +83,7 @@ pub enum IgnoreMatcher {
     HostSuffix(String),
     /// `wildcard` — host glob compiled to a host-level regex (`*` = `[^.]*`).
     HostRegex(Regex),
-    /// `url_wildcard` (auto-anchored, `*` = `[^/]*`) and `url_regex` (raw, no
+    /// `url_wildcard` (auto-anchored, `*` = `.*`) and `url_regex` (raw, no
     /// auto-anchor) both flatten into a full-URL regex.
     UrlRegex(Regex),
 }
@@ -118,13 +118,14 @@ fn host_glob_to_regex(glob: &str) -> String {
 }
 
 /// Convert a URL glob (`https://example.com/api/*`) into an anchored regex
-/// where `*` matches a non-`/` run. All other regex meta is escaped.
+/// where `*` matches any characters (including `/`). All other regex meta is
+/// escaped.
 fn url_glob_to_regex(glob: &str) -> String {
     let mut out = String::with_capacity(glob.len() + 8);
     out.push('^');
     for ch in glob.chars() {
         match ch {
-            '*' => out.push_str("[^/]*"),
+            '*' => out.push_str(".*"),
             '.' | '\\' | '+' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|' | '^' | '$' => {
                 out.push('\\');
                 out.push(ch);
@@ -388,10 +389,28 @@ mod tests {
     }
 
     #[test]
-    fn url_wildcard_does_not_cross_slash() {
-        assert!(!hits(
+    fn url_wildcard_crosses_slash() {
+        assert!(hits(
             &matcher(r#"{"url_wildcard":"https://example.com/api/*"}"#),
             "https://example.com/api/foo/bar"
+        ));
+    }
+
+    #[test]
+    fn url_wildcard_matches_deep_path() {
+        assert!(hits(
+            &matcher(r#"{"url_wildcard":"https://ipecho.io/*"}"#),
+            "https://ipecho.io/tools/q-data.json"
+        ));
+    }
+
+    #[test]
+    fn url_wildcard_requires_path_prefix() {
+        // `*` is greedy across `/`, but the literal `/` before `*` still has
+        // to be present — auto-anchored at both ends.
+        assert!(!hits(
+            &matcher(r#"{"url_wildcard":"https://ipecho.io/*"}"#),
+            "https://ipecho.io"
         ));
     }
 

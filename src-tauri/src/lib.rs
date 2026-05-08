@@ -81,6 +81,7 @@ const MENU_ID_RELOAD: &str = "pouch.reload";
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     init_tracing();
+    install_panic_hook();
 
     let build_result = tauri::Builder::default()
         // Standard macOS menu bar: <App> / File / Edit / View / Window.
@@ -432,6 +433,11 @@ pub fn run() {
             }
 
             let _main = builder.build()?;
+            tracing::debug!(
+                target: "hook",
+                "[window] created label=main url={}",
+                cfg.target_url
+            );
 
             // 3b. macOS-only: drop three SF Symbol buttons into the right
             //     side of the titlebar — Reveal Folder / Reload / Open
@@ -496,11 +502,22 @@ pub fn run() {
 
     match build_result {
         Ok(app) => {
-            app.run(|app_handle, event| {
+            use std::sync::atomic::{AtomicBool, Ordering};
+            static EXITING: AtomicBool = AtomicBool::new(false);
+
+            app.run(|_app_handle, event| {
+                tracing::trace!(target: "hook", "[runevent] {:?}", event);
                 if let tauri::RunEvent::ExitRequested { code, .. } = event {
                     // Tauri 在所有 window 关闭后发出 ExitRequested（macOS 不自动退）。
-                    // hook-tokio runtime 是 OnceLock 永不 drop，必须显式 process::exit。
-                    app_handle.exit(code.unwrap_or(0));
+                    // hook-tokio runtime 是 OnceLock 永不 drop，无法 graceful shutdown，
+                    // 必须强杀。直接 std::process::exit 绕开 Tauri 派发，避免
+                    // AppHandle::exit 内部 re-emit ExitRequested 形成无限递归
+                    // (RuntimeRunEvent::ExitRequested -> RunEvent::ExitRequested -> callback
+                    //  -> AppHandle::exit -> RuntimeRunEvent::ExitRequested ... 22 次实证)。
+                    // EXITING swap 是 defensive：万一 callback 被并发派发也只走一次。
+                    if !EXITING.swap(true, Ordering::SeqCst) {
+                        std::process::exit(code.unwrap_or(0));
+                    }
                 }
             });
         }
@@ -551,4 +568,17 @@ fn init_tracing() {
         .with_env_filter(env_filter)
         .with_timer(ChronoLocal::new("%Y-%m-%d %H:%M:%S".to_string()))
         .try_init();
+}
+
+/// Install a process-wide panic hook that funnels panics through `tracing`
+/// (target `hook`, level `error`) so panics on background threads —
+/// `hook-tokio` workers, `dispatch_async` blocks, Tauri event listeners —
+/// surface in the standard log stream instead of being silently swallowed
+/// when the default hook's stderr message races with the close path. Keeps
+/// the panic location/payload but does **not** abort: matches the default
+/// hook's "log + unwind" semantics.
+fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        tracing::error!(target: "hook", "[panic] {info}");
+    }));
 }
