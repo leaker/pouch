@@ -1,0 +1,355 @@
+# =============================================================================
+# Cross-platform build workflow for Pouch (Tauri v2 desktop app).
+#
+# What this workflow does
+# -----------------------
+#   - On push to `main` and on pull_request targeting `main`:
+#       smoke-build the app on macOS (Apple Silicon) and Windows. Nothing is
+#       published to GitHub Releases; this is purely a "does it still compile
+#       and bundle end-to-end?" check.
+#
+#   - On push of a tag matching `v*` (e.g. `v0.1.0`, `v1.2.3-rc1`):
+#       build on the same matrix AND create a GitHub Release. The macOS `.dmg`
+#       and the Windows portable `.exe` + sample `.zip` bundles produced by
+#       the build jobs are uploaded as release assets by `softprops/action-gh-release`
+#       in a dedicated `release` job that runs after both builds finish.
+#
+# Artifacts (final shape)
+# -----------------------
+#   - macOS  (macos-latest, aarch64-apple-darwin):
+#       * `pouch_<version>_aarch64.dmg`
+#         Signed with Developer ID Application + notarized by Apple's
+#         notary service. Built by `tauri-apps/tauri-action` (the
+#         standard, well-tested path).
+#
+#   - Windows (windows-latest, x86_64-pc-windows-msvc):
+#       * `pouch-windows-x86_64.exe`
+#         The raw portable binary copied from
+#         `src-tauri/target/release/pouch.exe`.
+#       * `pouch-windows-x86_64.zip`
+#         A self-contained sample bundle with the layout:
+#             pouch.exe
+#             hook.config.json
+#             inject/
+#                 global.js
+#                 leelib.js
+#         The `overrides/` directory (which holds runtime-cached
+#         resources at dev/run time) is intentionally NOT included --
+#         shipping that data could leak local development state.
+#
+# Why we bypass tauri-action on Windows
+# -------------------------------------
+# Tauri's Windows bundler defaults to `.msi` (and optionally NSIS `.exe`
+# installer). For Pouch we want a *portable* `.exe` and a self-contained
+# `.zip` -- not an installer. Running `cargo build --release` directly inside
+# `src-tauri/` produces exactly that, with no bundling overhead. tauri-action
+# remains the right tool for macOS where signing + notarization is
+# non-trivial to reimplement by hand.
+#
+# Linux, x86_64-mac, universal-apple-darwin, iOS and Android are
+# intentionally out of scope for Pouch.
+#
+# macOS code signing + notarization
+# ---------------------------------
+# We import an Apple Developer ID certificate into a temporary keychain on the
+# runner before invoking tauri-action, then pass the Apple credentials through
+# the environment so tauri-action notarizes the resulting .app/.dmg with
+# Apple's notary service. Windows is *not* signed by this workflow.
+#
+# Required GitHub Secrets (Repo -> Settings -> Secrets and variables ->
+# Actions -> New repository secret). The workflow will skip the macOS signing
+# step gracefully if `APPLE_CERTIFICATE` is empty (e.g. on a fork's PR), but
+# release builds without these secrets will produce unsigned artifacts that
+# Gatekeeper will quarantine on end-user machines.
+#
+#   APPLE_CERTIFICATE
+#       Base64-encoded .p12 file containing your "Developer ID Application"
+#       certificate AND its private key. Export from Keychain Access ->
+#       My Certificates, then:  base64 -i cert.p12 | pbcopy   (macOS)
+#                               base64 -w 0 cert.p12          (Linux)
+#       Paste the resulting single-line string as the secret value.
+#
+#   APPLE_CERTIFICATE_PASSWORD
+#       The password you set when exporting the .p12 above. Used by `security
+#       import` to unlock the certificate.
+#
+#   APPLE_SIGNING_IDENTITY
+#       The exact name of the codesigning identity, e.g.
+#           "Developer ID Application: Jane Doe (ABCDE12345)"
+#       Run `security find-identity -v -p codesigning` locally to copy it.
+#       Tauri matches this string against the keychain to pick the cert.
+#
+#   APPLE_ID
+#       Your Apple ID email address (the one enrolled in the Developer
+#       Program). Used by the notary service for authentication.
+#
+#   APPLE_PASSWORD
+#       An *app-specific password* generated at https://appleid.apple.com ->
+#       Sign-In and Security -> App-Specific Passwords.  NOT your Apple ID
+#       login password. Notarization will fail with a non-obvious 401 if you
+#       use the regular password.
+#
+#   APPLE_TEAM_ID
+#       Your 10-character Team ID (e.g. `ABCDE12345`), found at
+#       https://developer.apple.com/account -> Membership. Required when
+#       your Apple ID belongs to multiple teams; safe to always set.
+#
+#   KEYCHAIN_PASSWORD
+#       Any random throwaway string. Used only to lock/unlock the temporary
+#       build keychain we create on the runner; it never leaves the job.
+#
+# Tooling versions are pinned to current stable major tags. Bump deliberately.
+# =============================================================================
+
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+# Default to read-only at the workflow level; the `release` job opts back in
+# to `contents: write` when it needs to publish a Release.
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # macOS build: signed + notarized .dmg via tauri-action.
+  # ---------------------------------------------------------------------------
+  build-macos:
+    name: Build macOS (.dmg)
+    runs-on: macos-latest
+
+    # Hoist the cert secret to job-level env so the keychain step's `if:`
+    # expression can detect when it's empty (forked PRs cannot read secrets,
+    # and `secrets.*` is not allowed inside `if:`).
+    env:
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Setup Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Cache cargo registry/git AND the per-crate target directory.
+          workspaces: './src-tauri -> target'
+
+      - name: Install JS dependencies
+        run: bun install --frozen-lockfile
+
+      # ----------------------------------------------------------------------
+      # Import the Developer ID certificate into a fresh keychain so codesign
+      # can find it during `tauri build`. Skipped when the secret is unset
+      # (e.g. PR builds from forks) so the smoke-build still runs.
+      # ----------------------------------------------------------------------
+      - name: Import Apple Developer certificate
+        if: env.APPLE_CERTIFICATE != ''
+        env:
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          echo "$APPLE_CERTIFICATE" | base64 --decode > certificate.p12
+          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security set-keychain-settings -t 3600 -u build.keychain
+          security import certificate.p12 \
+            -k build.keychain \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" build.keychain
+          security find-identity -v -p codesigning build.keychain
+          rm -f certificate.p12
+
+      # ----------------------------------------------------------------------
+      # Build (and sign + notarize when secrets are present). tauri-action
+      # handles bundling, signing (via APPLE_* env), and notarization. We do
+      # NOT pass tagName/releaseName/releaseBody here -- the dedicated
+      # `release` job below collects artifacts from upload-artifact and
+      # publishes them in a single coordinated step.
+      # ----------------------------------------------------------------------
+      - name: Build Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+
+      # ----------------------------------------------------------------------
+      # Stash the .dmg for the release job. We only ship the .dmg (not the
+      # .app bundle next to it) because that's what end users download.
+      # `if-no-files-found: error` makes a misconfigured bundler step fail
+      # loudly instead of producing an empty release.
+      # ----------------------------------------------------------------------
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-bundle
+          path: src-tauri/target/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # Windows build: portable .exe + zipped sample bundle, NO installer.
+  # We bypass `tauri build` and call cargo directly because the only thing we
+  # want from the Tauri toolchain on Windows is the linked binary -- no
+  # WiX/NSIS bundling, no signing, no install metadata.
+  # ---------------------------------------------------------------------------
+  build-windows:
+    name: Build Windows (portable .exe + .zip)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Setup Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install JS dependencies
+        run: bun install --frozen-lockfile
+
+      # ----------------------------------------------------------------------
+      # Build the binary directly with cargo. The Tauri runtime bits compile
+      # the same way they would under `tauri build`; we just skip the
+      # bundler. cwd is `src-tauri/` because that's where Cargo.toml lives.
+      # ----------------------------------------------------------------------
+      - name: Cargo build (release)
+        working-directory: src-tauri
+        run: cargo build --release
+
+      # ----------------------------------------------------------------------
+      # Stage the artifacts. PowerShell because Windows runners default to it
+      # and it gives us native `Compress-Archive` without extra tooling.
+      #
+      # Layout produced inside ./artifacts:
+      #   pouch-windows-x86_64.exe
+      #   pouch-windows-x86_64.zip   (contains exe + config + inject/)
+      #
+      # The zip's inner layout intentionally puts files at the archive root
+      # so a user can unzip-and-run.
+      # ----------------------------------------------------------------------
+      - name: Stage Windows artifacts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $crate = 'pouch'
+          $assetBase = "$crate-windows-x86_64"
+
+          $repoRoot = $env:GITHUB_WORKSPACE
+          $exeSrc = Join-Path $repoRoot 'src-tauri/target/release' "$crate.exe"
+          if (-not (Test-Path $exeSrc)) {
+            throw "Expected built binary not found: $exeSrc"
+          }
+
+          # Staging directory whose contents become the zip's root entries.
+          $stage = Join-Path $repoRoot "stage-$assetBase"
+          if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
+          New-Item -ItemType Directory -Path $stage | Out-Null
+
+          # Copy the binary under its plain (unsuffixed) name -- that's what
+          # users will see after extracting the zip.
+          Copy-Item $exeSrc (Join-Path $stage "$crate.exe")
+
+          # Sample config + inject scripts live at the project root.
+          Copy-Item (Join-Path $repoRoot 'hook.config.json') $stage
+          Copy-Item (Join-Path $repoRoot 'inject') $stage -Recurse
+
+          # NOTE: overrides/ is intentionally not copied; it holds runtime
+          # cached resources and would leak local dev state into a release.
+
+          # Final artifacts directory.
+          $out = Join-Path $repoRoot 'artifacts'
+          New-Item -ItemType Directory -Path $out -Force | Out-Null
+
+          # Zip the staged tree (contents-of-stage, not stage itself).
+          $zipPath = Join-Path $out "$assetBase.zip"
+          if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
+          Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zipPath
+
+          # Also publish the bare .exe under its suffixed name for users who
+          # don't need the sample inject/ tree.
+          Copy-Item $exeSrc (Join-Path $out "$assetBase.exe")
+
+          Write-Host 'Windows artifacts staged:'
+          Get-ChildItem $out | ForEach-Object { Write-Host (' - ' + $_.FullName) }
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-bundle
+          path: |
+            artifacts/pouch-windows-x86_64.exe
+            artifacts/pouch-windows-x86_64.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # Release job: only runs on `v*` tag pushes, after both builds succeed.
+  # Uses ubuntu-latest because all it does is download artifacts and publish
+  # a release -- no platform-specific tooling needed (saves macOS minutes).
+  # ---------------------------------------------------------------------------
+  release:
+    name: Publish GitHub Release
+    needs: [build-macos, build-windows]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      # No checkout needed -- we're not reading repo files, just artifacts.
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v7
+        with:
+          path: artifacts
+          # `merge-multiple: true` flattens artifact-name subdirs so all
+          # files land directly under ./artifacts. With our two artifact
+          # names this leaves us with the .dmg, .exe, and .zip side by side.
+          merge-multiple: true
+
+      - name: List downloaded artifacts
+        run: ls -la artifacts
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          fail_on_unmatched_files: true
+          files: |
+            artifacts/*.dmg
+            artifacts/*.exe
+            artifacts/*.zip
