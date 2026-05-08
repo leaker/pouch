@@ -372,8 +372,18 @@ fn apply_decision_on_ui_thread(handles: HandlerHandles, url: &str, decision: Dec
     } = handles;
 
     let outcome = match decision {
-        Decision::Respond { body, content_type } => unsafe {
-            build_and_set_response(&args, &environment, &body, content_type.as_deref())
+        Decision::Respond {
+            body,
+            content_type,
+            extra_headers,
+        } => unsafe {
+            build_and_set_response(
+                &args,
+                &environment,
+                &body,
+                content_type.as_deref(),
+                &extra_headers,
+            )
         },
         Decision::Bypass => {
             // Policy already logged the BYPASS reason; surface a generic 502
@@ -391,20 +401,37 @@ fn apply_decision_on_ui_thread(handles: HandlerHandles, url: &str, decision: Dec
     }
 }
 
-/// Construct an `ICoreWebView2WebResourceResponse` carrying `body` and
-/// optional `content_type`, then `args.SetResponse(...)`.
+/// Construct an `ICoreWebView2WebResourceResponse` carrying `body`,
+/// `content_type`, and the curated upstream `extra_headers` (already
+/// filtered through policy's hop-by-hop blacklist). Then `args.SetResponse(...)`.
+///
+/// `CreateWebResourceResponse` accepts headers as a single `\r\n`-separated
+/// `"Name: Value"` block. WebView2 documentation explicitly says repeating
+/// the same header name yields a multi-value header, which is exactly what
+/// we need for `Set-Cookie` (one line per cookie).
 unsafe fn build_and_set_response(
     args: &ICoreWebView2WebResourceRequestedEventArgs,
     environment: &ICoreWebView2Environment,
     body: &[u8],
     content_type: Option<&str>,
+    extra_headers: &[(String, String)],
 ) -> windows::core::Result<()> {
     let mut headers_map = String::new();
     if let Some(ct) = content_type {
-        // Header format expected by CreateWebResourceResponse: \r\n separated
-        // "Name: Value" lines (no terminating CRLF).
         headers_map.push_str("Content-Type: ");
         headers_map.push_str(ct);
+        headers_map.push_str("\r\n");
+    }
+    for (name, value) in extra_headers {
+        // Skip anything containing CR/LF in the value to avoid header
+        // injection (defense-in-depth; reqwest's HeaderValue already
+        // forbids CR/LF, but `String` here doesn't enforce it).
+        if value.contains('\r') || value.contains('\n') {
+            continue;
+        }
+        headers_map.push_str(name);
+        headers_map.push_str(": ");
+        headers_map.push_str(value);
         headers_map.push_str("\r\n");
     }
     headers_map.push_str("Content-Length: ");

@@ -318,8 +318,14 @@ fn deliver(protocol: &HookURLProtocol, url: &str, decision: Decision) {
     };
 
     match decision {
-        Decision::Respond { body, content_type } => {
-            if let Err(e) = deliver_respond(&client, protocol, url, &body, content_type) {
+        Decision::Respond {
+            body,
+            content_type,
+            extra_headers,
+        } => {
+            if let Err(e) =
+                deliver_respond(&client, protocol, url, &body, content_type, &extra_headers)
+            {
                 warn!(target: "hook", "[hook][mac] deliver_respond failed url={} err={}", url, e);
                 let error = make_nserror(NSURLErrorCannotLoadFromNetwork);
                 client.URLProtocol_didFailWithError(protocol.as_super(), &error);
@@ -339,10 +345,11 @@ fn deliver_respond(
     url: &str,
     body: &[u8],
     content_type: Option<String>,
+    extra_headers: &[(String, String)],
 ) -> Result<(), String> {
     let url_ns = make_nsurl(url).ok_or_else(|| format!("invalid URL: {url}"))?;
 
-    let header_dict = build_response_header_dict(content_type.as_deref(), body.len());
+    let header_dict = build_response_header_dict(content_type.as_deref(), body.len(), extra_headers);
     let http_version = NSString::from_str("HTTP/1.1");
 
     let response = NSHTTPURLResponse::initWithURL_statusCode_HTTPVersion_headerFields(
@@ -408,17 +415,49 @@ fn nsdict_to_header_map(
     Ok(out)
 }
 
-/// Build the response header dictionary handed to NSHTTPURLResponse. We keep
-/// it minimal — Content-Type (when policy gave us one) plus Content-Length.
-/// Webviews don't need the full upstream header set to render a cached body;
-/// adding more (Cache-Control, ETag, etc.) would risk leaking stale freshness
-/// hints from the moment the bytes were captured.
+/// Build the response header dictionary handed to NSHTTPURLResponse.
+///
+/// In addition to `Content-Type` + `Content-Length`, we forward upstream
+/// `extra_headers` (already filtered through policy's hop-by-hop blacklist)
+/// so the webview sees `Set-Cookie`, `Cache-Control`, `Location` etc.
+///
+/// **Multi-value headers**: NSDictionary disallows duplicate keys, but WebKit
+/// internally splits values by `\n` for `Set-Cookie` (matching CFNetwork's
+/// historical behaviour). We therefore:
+///
+/// - join multiple `Set-Cookie` values with `\n` (each cookie keeps its own
+///   `Path` / `Expires` / `Secure` attributes intact, and WebKit still
+///   inserts each cookie into `NSHTTPCookieStorage` separately);
+/// - join other repeated headers (Vary, Cache-Control, etc.) with `, ` per
+///   RFC 7230 §3.2.2, which is the canonical join for non-Set-Cookie.
 fn build_response_header_dict(
     content_type: Option<&str>,
     content_length: usize,
+    extra_headers: &[(String, String)],
 ) -> Retained<NSDictionary<NSString, NSString>> {
-    let mut keys: Vec<Retained<NSString>> = Vec::with_capacity(2);
-    let mut values: Vec<Retained<NSString>> = Vec::with_capacity(2);
+    use std::collections::BTreeMap;
+
+    // Group multi-value headers (case-insensitive on the key, but keep the
+    // first-seen casing for the NSDictionary key).
+    struct Acc {
+        canonical_name: String,
+        values: Vec<String>,
+    }
+    let mut grouped: BTreeMap<String, Acc> = BTreeMap::new();
+    for (name, value) in extra_headers {
+        let lower = name.to_ascii_lowercase();
+        grouped
+            .entry(lower)
+            .or_insert_with(|| Acc {
+                canonical_name: name.clone(),
+                values: Vec::new(),
+            })
+            .values
+            .push(value.clone());
+    }
+
+    let mut keys: Vec<Retained<NSString>> = Vec::with_capacity(grouped.len() + 2);
+    let mut values: Vec<Retained<NSString>> = Vec::with_capacity(grouped.len() + 2);
 
     if let Some(ct) = content_type {
         keys.push(NSString::from_str("Content-Type"));
@@ -426,6 +465,18 @@ fn build_response_header_dict(
     }
     keys.push(NSString::from_str("Content-Length"));
     values.push(NSString::from_str(&content_length.to_string()));
+
+    for (lower, acc) in grouped {
+        let joined = if lower == "set-cookie" {
+            // RFC 6265 says Set-Cookie cannot be safely joined with `, ` —
+            // we use `\n` which WebKit's CFNetwork-derived parser splits on.
+            acc.values.join("\n")
+        } else {
+            acc.values.join(", ")
+        };
+        keys.push(NSString::from_str(&acc.canonical_name));
+        values.push(NSString::from_str(&joined));
+    }
 
     let key_refs: Vec<&NSString> = keys.iter().map(|k| k.as_ref()).collect();
     let val_refs: Vec<&NSString> = values.iter().map(|v| v.as_ref()).collect();

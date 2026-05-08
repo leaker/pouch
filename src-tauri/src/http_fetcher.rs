@@ -22,13 +22,26 @@ const STRIPPED_REQUEST_HEADERS: &[&str] = &[
 
 static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
-/// Shared `reqwest::Client` configured with redirect-follow (limit 10) and
-/// the default rustls TLS stack. No cookie jar, no custom user-agent (kept
-/// transparent so the upstream server sees an unmodified request).
+/// Shared `reqwest::Client` configured with redirect-follow (limit 10),
+/// the default rustls TLS stack, and an in-process cookie jar so multiple
+/// hook'd requests in the same session share Set-Cookie state. No custom
+/// user-agent (kept transparent so the upstream server sees an unmodified
+/// request).
+///
+/// **Cookie isolation caveat**: the webview maintains its own cookie store
+/// (NSHTTPCookieStorage on macOS, the WebView2 cookie manager on Windows)
+/// which is **not** synchronised with this jar. The reqwest jar mitigates
+/// the simplest case — sequential reqwest requests on the same upstream
+/// origin — but cookies set in the webview are not visible here, and vice
+/// versa. Combined with response Set-Cookie forwarding (see the platform
+/// `deliver_respond` paths), the webview's own jar still receives the
+/// upstream Set-Cookie via the headers we forward, so subsequent webview
+/// requests carry it naturally.
 pub fn client() -> &'static reqwest::Client {
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::limited(10))
+            .cookie_store(true)
             .build()
             .expect("failed to build reqwest client")
     })
@@ -49,7 +62,12 @@ pub async fn fetch(
         clean_headers.remove(*name);
     }
 
-    client().get(url).headers(clean_headers).send().await
+    client()
+        .get(url)
+        .headers(clean_headers)
+        .header("X-Hook-Bypass", "1")
+        .send()
+        .await
 }
 
 #[cfg(test)]

@@ -373,11 +373,16 @@ overrides/
 
 Source: [`src-tauri/src/cache_store.rs`](src-tauri/src/cache_store.rs)
 
-`https://host/path?query#hash` → `host/path`:
+`https://host/path?query#hash` →
 
-- query / fragment / scheme are **all dropped** — `?v=1` and `?v=2` hit the **same** cache entry (see the known limitations in §8)
-- A path ending with `/` or empty automatically gets `index.html` appended (`https://example.com/` → `example.com/index.html`)
-- Percent-encoded path segments are decoded once before being written to disk (`p%20q.png` → `p q.png` on the filesystem)
+- **No query**: `host/path` (e.g. `https://x.com/foo.js` → `x.com/foo.js`). A path ending with `/` or empty automatically gets `index.html` appended (`https://example.com/` → `example.com/index.html`).
+- **With query**: `host/path.__qs_<8 hex chars>__<ext>` — a flat filename suffix, zero extra directory layers. The original filename (extension included) stays as the prefix and the extension is **repeated** at the very end so editors / Quick Look still recognise the file type. Example: `https://x.com/foo.js?v=1` → `x.com/foo.js.__qs_8d2f3e1a__.js`. `find -name 'foo.js*'` lists the no-query entry plus every query variant side-by-side. The hash is `std::hash::DefaultHasher` truncated to 32 bits — a namespacing key, not a security boundary.
+- **Fragment** (`#hash`) is intentionally **dropped** — fragments are client-side only and never reach the server, so they do not influence cache identity.
+- **Scheme** (`http://` vs `https://`) is intentionally dropped — variants of the same host+path share a cache entry.
+- **Percent-encoded path segments** are decoded once before being written to disk (`p%20q.png` → `p q.png` on the filesystem).
+- **Query order** is **not** normalised — `?a=1&b=2` and `?b=2&a=1` map to different keys. This matches the conservative behaviour of every common HTTP cache: re-ordering query params can change which resource the upstream serves.
+
+> **Upgrade note**: prior versions of pouch dropped the query from the cache key, so `overrides/` directories created before the query-aware key was added contain entries keyed only by `host/path`. Those entries will never collide with the new `.__qs_<hash>__` filename suffix, but they will also never be reused. If you see stale or wrong content after upgrading, the simplest reset is `rm -rf overrides/* && touch overrides/.gitkeep`.
 
 ### 5.3 Atomic writes
 
@@ -480,12 +485,12 @@ INFO hook: [startup] inject rules = 2 (dispatcher WILL be attached)
 - **WebSockets are not intercepted**: neither backend can capture WebSocket frames after the upgrade handshake; same limitation as Electron CDP (CDP also only intercepts HTTP)
 - **POST / non-GET is not cached**: `policy::evaluate` only handles GET. The platform layer checks the method at the entry point and lets non-GET through directly (the macOS path returns NO from `+canInitWithRequest:`; the Windows path returns from the handler without calling `SetResponse`), letting the webview use its default network stack
 - **No HTTP conditional requests**: `http_fetcher::fetch` actively strips `If-None-Match` / `If-Modified-Since` / `If-Match` / `If-Unmodified-Since` / `If-Range`, always pulling the full body. Hits serve from cache without a conditional request; ETag / Last-Modified are recorded in the sidecar for future use only
-- **query / fragment are dropped**: `?v=1` and `?v=2` share one cache entry (inherited from v1, compatible with the original Electron version)
+- **fragment is dropped from the cache key**: `#a` and `#b` share one cache entry (this is correct per HTTP — fragments never reach the server). Distinct query strings, on the other hand, **do** map to distinct cache entries (`?v=1` and `?v=2` are stored separately) so dynamic signed URLs like `?time=…&sign=…` no longer replay stale tokens — see §5.2
 - **Top-level navigation also goes through the interceptor**: the webview is started programmatically with `WebviewUrl::External(target_url)`, and the first frame's top-level document request is **also** covered by the native interception layer (macOS NSURLProtocol and Windows WebView2 WebResourceRequested both catch it), so `index.html` is cached on first launch
 - **JS injection does not re-run on SPA route changes**: `inject/*.js` runs once at document_start; pseudo-navigations performed by frontend frameworks via `history.pushState` will **not** re-trigger the rules. Hook the history API yourself if you need to react to route changes (see §6.2)
 - **`@match *` matches every URL**: including `about:blank` and `data:` subframes. Narrow it to at least `@match https://*` to match only http(s) origins
 - **macOS / Windows only**: Linux does not work (see §7)
-- **Cookie isolation**: cookies are managed entirely by the webview and **are not synced with upstream reqwest** — reqwest's `Set-Cookie` is internal-only and never visible to the webview. However, the webview sees the real https origin on every request and response, so its cookie / CSP / SRI behaviour is 100% identical to the real origin. The only edge case is "upstream `Set-Cookie` does not reach the webview on a cache hit", which is transparent for the vast majority of static-subresource scenarios
+- **Cookie isolation**: cookies are split between two stores. The **webview** owns its own cookie jar (`NSHTTPCookieStorage` on macOS, the WebView2 cookie manager on Windows) and **reqwest** keeps its own in-process jar (enabled via `cookie_store(true)`). On a cache MISS / ignore-list passthrough, upstream `Set-Cookie` headers are forwarded verbatim to the webview (so it stores the cookie and replays it on subsequent requests) **and** stored in reqwest's jar (so further reqwest-driven fetches in the same session also carry it). The two jars are not bidirectionally synchronised, so cookies set by JS inside the webview are not visible to reqwest, and vice versa. On a cache HIT only `content_type` is replayed from the sidecar — the original `Set-Cookie` is intentionally not replayed (it would be stale)
 - **Large files are buffered fully in memory**: `cache_store::read/write` loads each entry into a single `Vec<u8>`; resources > 100 MB may OOM (inherited from v1, left as future work to redo with streaming)
 - **WebView2 Runtime version requirement**: `ICoreWebView2_22` requires Runtime ≥ 1.0.2210.55 (early 2024); older versions fall back to document/iframe-only interception, with a clear log line prompting the user to upgrade the Runtime
 
@@ -497,7 +502,7 @@ For context, here is how Pouch differs in detail from a CDP-driven interception 
 |---|---|---|
 | Interception method | CDP `Fetch.requestPaused` | macOS `NSURLProtocol` + Windows `WebView2 WebResourceRequested` |
 | Cookie / Origin / CSP | Automatically correct | Automatically correct (same abstraction layer) |
-| Cache key algorithm | `host + pathname` (typical) | `host + pathname` |
+| Cache key algorithm | `host + pathname` (typical) | `host + pathname[__qs<query-hash>]` (query-aware) |
 | Cache directory layout | `overrides/<host>/<path>` (typical) | `overrides/<host>/<path>` |
 | `Content-Type` on cache hit | Often lost (raw `fulfillRequest` without headers) | Sidecar stores `content_type`, read directly on hits |
 | Write atomicity | Direct `fs.writeFile` (crash leaves a half-written file) | `tempfile::NamedTempFile + persist` (POSIX `rename(2)`) |
