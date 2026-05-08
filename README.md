@@ -126,11 +126,31 @@ The DevTools button doubles as a state indicator: it shows the outlined `wrench.
 Pouch runs as a single process and supports multiple `WebviewWindow`s sharing the same WebKit data store, so cookies, `localStorage`, and the disk cache are shared across windows. There are two ways to open extra windows:
 
 1. **Startup `windows` array in `hook.config.json`** — every entry is opened as its own window when Pouch launches, alongside the main `target_url` window. See §4.1 for the schema.
-2. **`File → New Window` (`Cmd+N`)** — pops a native `NSAlert` prompt asking for a URL; pressing Return (or clicking *Open*) opens that URL as an additional window. Escape / Cancel / non-http(s) input quietly closes the prompt.
+2. **`File → New Window` (`Cmd+N`)** — pops a native `NSAlert` (titled with a `globe` SF Symbol icon) whose accessory view is a wide `NSComboBox`: type a URL or pick from the dropdown of recently-used destinations. Pressing Return (or clicking *Open*) opens that URL as an additional window. Escape / Cancel / non-http(s) input is a quiet no-op. Recent URLs are persisted across launches in `recent_urls.json` next to `hook.config.json`, and the field starts empty so a fresh paste is unobstructed.
 
 Each window gets its own titlebar accessory (Reveal / Reload / Toggle DevTools). The DevTools button is per-window — clicking the button or pressing F12 toggles DevTools on the focused window only — while the Reveal Folder button is process-global and the Reload button still restarts the whole application (so all windows close and reopen with the freshly-read config).
 
 This feature is currently macOS-only because the New Window prompt is implemented against `NSAlert`; the rest of the multi-window plumbing is cross-platform and the startup `windows` array works on Windows too.
+
+### 2.7 Menu bar (macOS)
+
+On macOS Pouch installs a HIG-standard menu bar with five top-level menus, replacing Tauri's default macOS menu so the `View` entries (Open DevTools, Reveal Folder, Reload from Config) coexist with the standard editing / window controls:
+
+| Menu | Notable items |
+|---|---|
+| `Pouch` | About Pouch, Services, Hide / Hide Others / Show All, Quit Pouch (Cmd+Q) |
+| `File` | New Window (Cmd+N — see §2.6), Close Window (Cmd+W) |
+| `Edit` | Cut / Copy / Paste / Select All (auto-wired to the focused webview) |
+| `View` | Open DevTools (F12), Reveal Pouch Folder in Finder (Cmd+Shift+O), Reload from Config (Cmd+R) |
+| `Window` | Minimize / Zoom / Close, plus an auto-populated list of open windows with ``Cmd+` `` cycling between them |
+
+The `Window` submenu is tagged with Tauri's `WINDOW_SUBMENU_ID` so AppKit owns the live window list — Pouch never has to reconcile that itself. On Windows only the `View` menu is installed (the OS supplies the rest via the system menu).
+
+### 2.8 Page loading indicator
+
+Every Pouch window opens with the title prefix `⏳ Loading...` set on the underlying `NSWindow` / `HWND` at builder time, so the prefix is visible from the moment the window appears — before WKWebView's first byte arrives. On macOS the titlebar accessory adds a small `NSProgressIndicator` (16pt spinning, indeterminate) at the left edge of the action buttons; it starts on `page_load Started` and stops on `page_load Finished`.
+
+Once the page reports its real `<title>`, Tauri's `on_document_title_changed` swaps the OS window title to it. The `Finished` handler only falls back to a host-derived title if the title still starts with `⏳ Loading...`, so a page that sets `document.title` before navigation finishes is never clobbered.
 
 ## 3. How it works
 
