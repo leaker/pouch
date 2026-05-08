@@ -4,29 +4,41 @@
 # What this workflow does
 # -----------------------
 #   - On push to `main` and on pull_request targeting `main`:
-#       smoke-build the app on macOS (Apple Silicon) and Windows. Nothing is
-#       published to GitHub Releases; this is purely a "does it still compile
-#       and bundle end-to-end?" check.
+#       run a fast `cargo check` on macOS (Apple Silicon) and Windows runners.
+#       No bundling, no signing, no notarization, no artifact upload, no
+#       Release. This is purely a "does the tree still compile?" smoke test.
 #
-#   - On push of a tag matching `v*` (e.g. `v0.1.0`, `v1.2.3-rc1`):
-#       build on the same matrix AND create a GitHub Release. The macOS `.dmg`
-#       and the Windows portable `.exe` + sample `.zip` bundles produced by
-#       the build jobs are uploaded as release assets by `softprops/action-gh-release`
-#       in a dedicated `release` job that runs after both builds finish.
+#   - On push of a tag matching `v*` (e.g. `v0.1.0`, `v1.2.3-rc1`) OR on
+#       manual `workflow_dispatch`:
+#       run the full release path: macOS universal-darwin build via
+#       tauri-action with sign + notarize + .dmg bundling, Windows
+#       `cargo build --release` + portable .exe / .zip staging, then create
+#       a GitHub Release uploading both via `softprops/action-gh-release` in
+#       a dedicated `release` job that runs after both builds finish.
+#       (workflow_dispatch from a non-tag ref still produces artifacts but
+#       skips the GitHub Release publish step.)
 #
 # Artifacts (final shape)
 # -----------------------
-#   - macOS  (macos-latest, aarch64-apple-darwin):
-#       * `pouch_<version>_aarch64.dmg`
+# All artifacts share one filename pattern: `Pouch-<version>.<ext>` where
+# <version> is the git tag with the leading `v` stripped (so `v1.0.0-rc1`
+# becomes `1.0.0-rc1`). This means rc / beta builds never collide with the
+# matching final release on the same Releases page, and there is no
+# platform suffix to confuse downloaders -- the file extension already
+# tells the user which platform a given artifact is for.
+#
+#   - macOS  (macos-latest, universal-apple-darwin):
+#       * `Pouch-<version>.dmg`
 #         Signed with Developer ID Application + notarized by Apple's
-#         notary service. Built by `tauri-apps/tauri-action` (the
-#         standard, well-tested path).
+#         notary service. Built by `tauri-apps/tauri-action` under its
+#         default `Pouch_<version>_universal.dmg` name and renamed to the
+#         tag-bearing form by the workflow before upload-artifact.
 #
 #   - Windows (windows-latest, x86_64-pc-windows-msvc):
-#       * `pouch-windows-x86_64.exe`
+#       * `Pouch-<version>.exe`
 #         The raw portable binary copied from
 #         `src-tauri/target/release/pouch.exe`.
-#       * `pouch-windows-x86_64.zip`
+#       * `Pouch-<version>.zip`
 #         A self-contained sample bundle with the layout:
 #             pouch.exe
 #             hook.config.json
@@ -118,7 +130,15 @@ permissions:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # macOS build: signed + notarized .dmg via tauri-action.
+  # macOS build.
+  #
+  # Two modes, gated by the trigger:
+  #   - main / PR  -> fast `cargo check` smoke test only (no bundle, no sign,
+  #                   no notarize, no upload). Just confirms the tree compiles
+  #                   on Apple Silicon.
+  #   - v* tag / workflow_dispatch -> full release path: signed + notarized
+  #                   .dmg via tauri-action, then upload-artifact for the
+  #                   release job to pick up.
   # ---------------------------------------------------------------------------
   build-macos:
     name: Build macOS (.dmg)
@@ -143,6 +163,8 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Add x86_64 Apple Darwin target
+        # Only needed for the `--target universal-apple-darwin` release build.
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         run: rustup target add x86_64-apple-darwin
 
       - name: Rust cache
@@ -155,12 +177,19 @@ jobs:
         run: bun install --frozen-lockfile
 
       # ----------------------------------------------------------------------
+      # SMOKE-ONLY: `cargo check` on main push / PR. No bundling.
+      # ----------------------------------------------------------------------
+      - name: Cargo check (smoke)
+        if: ${{ !(startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') }}
+        working-directory: src-tauri
+        run: cargo check --locked
+
+      # ----------------------------------------------------------------------
       # Import the Developer ID certificate into a fresh keychain so codesign
-      # can find it during `tauri build`. Skipped when the secret is unset
-      # (e.g. PR builds from forks) so the smoke-build still runs.
+      # can find it during `tauri build`. Release-only.
       # ----------------------------------------------------------------------
       - name: Import Apple Developer certificate
-        if: env.APPLE_CERTIFICATE != ''
+        if: (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') && env.APPLE_CERTIFICATE != ''
         env:
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
@@ -188,6 +217,7 @@ jobs:
       # publishes them in a single coordinated step.
       # ----------------------------------------------------------------------
       - name: Build Tauri app
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         uses: tauri-apps/tauri-action@v0
         with:
           args: --target universal-apple-darwin
@@ -201,16 +231,43 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 
       # ----------------------------------------------------------------------
+      # Rename the .dmg to embed the tag so rc / beta artifacts don't collide
+      # with the matching final release (tauri-action defaults to a name like
+      # `Pouch_1.0.0_universal.dmg` based on tauri.conf.json's productName +
+      # version, which is identical for v1.0.0-rc1 and v1.0.0). On
+      # workflow_dispatch from a non-tag ref we fall back to the raw
+      # ref_name so the upload still works.
+      # ----------------------------------------------------------------------
+      - name: Rename macOS artifact with tag
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+        working-directory: src-tauri/target/universal-apple-darwin/release/bundle/dmg
+        run: |
+          set -euo pipefail
+          # `v1.0.0-rc1` -> `1.0.0-rc1`; for non-tag dispatches just use the
+          # ref name verbatim (no leading `v` to strip).
+          REF_NAME="${GITHUB_REF##*/}"
+          VERSION="${REF_NAME#v}"
+          shopt -s nullglob
+          for f in *.dmg; do
+            if [[ "$f" == "Pouch-${VERSION}.dmg" ]]; then
+              continue
+            fi
+            mv -- "$f" "Pouch-${VERSION}.dmg"
+          done
+          ls -la
+
+      # ----------------------------------------------------------------------
       # Stash the .dmg for the release job. We only ship the .dmg (not the
       # .app bundle next to it) because that's what end users download.
       # `if-no-files-found: error` makes a misconfigured bundler step fail
       # loudly instead of producing an empty release.
       # ----------------------------------------------------------------------
       - name: Upload macOS artifact
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v7
         with:
           name: macos-bundle
-          path: src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+          path: src-tauri/target/universal-apple-darwin/release/bundle/dmg/Pouch-*.dmg
           if-no-files-found: error
           retention-days: 7
 
@@ -219,6 +276,12 @@ jobs:
   # We bypass `tauri build` and call cargo directly because the only thing we
   # want from the Tauri toolchain on Windows is the linked binary -- no
   # WiX/NSIS bundling, no signing, no install metadata.
+  #
+  # Two modes, gated by the trigger:
+  #   - main / PR  -> fast `cargo check` smoke test only (no release build,
+  #                   no zip staging, no upload).
+  #   - v* tag / workflow_dispatch -> full release path: `cargo build
+  #                   --release`, stage portable .exe + .zip, upload.
   # ---------------------------------------------------------------------------
   build-windows:
     name: Build Windows (portable .exe + .zip)
@@ -245,11 +308,21 @@ jobs:
         run: bun install --frozen-lockfile
 
       # ----------------------------------------------------------------------
+      # SMOKE-ONLY: `cargo check` on main push / PR. No release build, no
+      # bundle staging.
+      # ----------------------------------------------------------------------
+      - name: Cargo check (smoke)
+        if: ${{ !(startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') }}
+        working-directory: src-tauri
+        run: cargo check --locked
+
+      # ----------------------------------------------------------------------
       # Build the binary directly with cargo. The Tauri runtime bits compile
       # the same way they would under `tauri build`; we just skip the
       # bundler. cwd is `src-tauri/` because that's where Cargo.toml lives.
       # ----------------------------------------------------------------------
       - name: Cargo build (release)
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         working-directory: src-tauri
         run: cargo build --release
 
@@ -257,19 +330,34 @@ jobs:
       # Stage the artifacts. PowerShell because Windows runners default to it
       # and it gives us native `Compress-Archive` without extra tooling.
       #
+      # Naming uses the tag (rc / beta tags survive intact so they never
+      # clobber the final-release artifacts). `v1.0.0-rc1` -> version
+      # `1.0.0-rc1`; on workflow_dispatch from a non-tag ref we use the raw
+      # ref name (which has no leading `v` to strip).
+      #
       # Layout produced inside ./artifacts:
-      #   pouch-windows-x86_64.exe
-      #   pouch-windows-x86_64.zip   (contains exe + config + inject/)
+      #   Pouch-<version>.exe
+      #   Pouch-<version>.zip   (contains pouch.exe + config + inject/)
       #
       # The zip's inner layout intentionally puts files at the archive root
       # so a user can unzip-and-run.
       # ----------------------------------------------------------------------
       - name: Stage Windows artifacts
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $crate = 'pouch'
-          $assetBase = "$crate-windows-x86_64"
+
+          # Tag-derived version. `GITHUB_REF_NAME` is `v1.0.0-rc1` for tag
+          # pushes and the branch name for workflow_dispatch on a branch.
+          $refName = $env:GITHUB_REF_NAME
+          if ($refName.StartsWith('v')) {
+            $version = $refName.Substring(1)
+          } else {
+            $version = $refName
+          }
+          $assetBase = "Pouch-$version"
 
           $repoRoot = $env:GITHUB_WORKSPACE
           $exeSrc = Join-Path $repoRoot 'src-tauri/target/release' "$crate.exe"
@@ -302,32 +390,39 @@ jobs:
           if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
           Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zipPath
 
-          # Also publish the bare .exe under its suffixed name for users who
-          # don't need the sample inject/ tree.
+          # Also publish the bare .exe under the same tag-bearing name for
+          # users who don't need the sample inject/ tree.
           Copy-Item $exeSrc (Join-Path $out "$assetBase.exe")
 
           Write-Host 'Windows artifacts staged:'
           Get-ChildItem $out | ForEach-Object { Write-Host (' - ' + $_.FullName) }
 
       - name: Upload Windows artifact
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v7
         with:
           name: windows-bundle
           path: |
-            artifacts/pouch-windows-x86_64.exe
-            artifacts/pouch-windows-x86_64.zip
+            artifacts/Pouch-*.exe
+            artifacts/Pouch-*.zip
           if-no-files-found: error
           retention-days: 7
 
   # ---------------------------------------------------------------------------
-  # Release job: only runs on `v*` tag pushes, after both builds succeed.
-  # Uses ubuntu-latest because all it does is download artifacts and publish
-  # a release -- no platform-specific tooling needed (saves macOS minutes).
+  # Release job: runs on `v*` tag pushes and on workflow_dispatch, after both
+  # builds succeed. Uses ubuntu-latest because all it does is download
+  # artifacts and publish a release -- no platform-specific tooling needed
+  # (saves macOS minutes).
+  #
+  # On workflow_dispatch (manual rebuild against a non-tag ref) the
+  # softprops/action-gh-release step still needs a tag to attach to. If the
+  # dispatch is launched from a non-tag ref, the publish step is skipped and
+  # only the artifacts are produced.
   # ---------------------------------------------------------------------------
   release:
     name: Publish GitHub Release
     needs: [build-macos, build-windows]
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
 
     permissions:
@@ -348,6 +443,7 @@ jobs:
         run: ls -la artifacts
 
       - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}
