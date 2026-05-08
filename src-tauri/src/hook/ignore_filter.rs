@@ -2,10 +2,15 @@
 //! `url_resolver::resolve`. Matched URLs bypass the cache and stream straight
 //! through `http_fetcher`.
 //!
-//! Rules are loaded exclusively from `hook.config.json`'s `ignore_urls` field
-//! at startup via [`init_from_entries`]; this module ships **no** built-in
-//! defaults. If the field is missing, empty, or `init_from_entries` is never
-//! called, [`is_ignored`] simply returns `false` for every URL.
+//! Rules are loaded from `hook.config.json`'s `ignore_urls` field via
+//! [`set_matchers`]; this module ships **no** built-in defaults. If the field
+//! is missing, empty, or [`set_matchers`] is never called, [`is_ignored`]
+//! simply returns `false` for every URL.
+//!
+//! [`set_matchers`] is an *atomic replace* — calling it again at runtime (the
+//! Reload code path swaps in a freshly-compiled rule set) overwrites the
+//! previous matcher list under a short write-lock window without restarting
+//! the process.
 //!
 //! # Schema
 //!
@@ -23,7 +28,7 @@
 //! parse the URL via the `url` crate so scheme / port / path / userinfo / IPv6
 //! brackets are handled correctly.
 
-use std::sync::OnceLock;
+use std::sync::RwLock;
 
 use regex::Regex;
 use serde::Deserialize;
@@ -83,9 +88,15 @@ pub enum IgnoreMatcher {
     UrlRegex(Regex),
 }
 
-/// Process-wide compiled matchers, populated once via [`init_from_entries`].
-/// Stays empty if the loader never runs or the config provided no rules.
-static IGNORE_MATCHERS: OnceLock<Vec<IgnoreMatcher>> = OnceLock::new();
+/// Process-wide compiled matchers, populated by [`set_matchers`]. Wrapped in a
+/// `RwLock` so the Reload path can atomically replace the rule set at runtime
+/// (`std::sync::RwLock` keeps zero new dependencies; readers hit the hot path
+/// — `is_ignored` — and writers run only on startup / explicit reload, so
+/// reader contention is essentially nil).
+///
+/// Stays empty (`Vec::new()`) until the first [`set_matchers`] call; readers
+/// short-circuit on the empty vec.
+static IGNORE_MATCHERS: RwLock<Vec<IgnoreMatcher>> = RwLock::new(Vec::new());
 
 /// Convert a host glob (`*.google.com`, `ads.*.com`) into an anchored regex
 /// where `*` only matches a single label segment (no `.`).
@@ -204,16 +215,23 @@ pub fn compile_entries(entries: &[IgnoreEntry]) -> Vec<IgnoreMatcher> {
     out
 }
 
-/// Install the compiled matcher set process-wide. Idempotent: only the first
-/// call wins; subsequent calls warn and are dropped (mirrors how the rest of
-/// startup uses `OnceLock`).
-pub fn init_from_entries(entries: &[IgnoreEntry]) {
+/// Install (or replace) the compiled matcher set process-wide. Used both at
+/// startup and by the runtime Reload path — calling twice atomically swaps in
+/// the freshly-compiled rule set under a short write-lock window. A poisoned
+/// lock (panic in another thread while holding the write guard, which the
+/// reader never does) is logged and dropped — `is_ignored` already treats a
+/// poisoned read as "no rules", so a one-off poison never escalates into a
+/// process kill.
+pub fn set_matchers(entries: &[IgnoreEntry]) {
     let compiled = compile_entries(entries);
-    if IGNORE_MATCHERS.set(compiled).is_err() {
-        warn!(
+    match IGNORE_MATCHERS.write() {
+        Ok(mut guard) => {
+            *guard = compiled;
+        }
+        Err(e) => warn!(
             target: "hook",
-            "[ignore_filter] init_from_entries called more than once; ignoring later call"
-        );
+            "[ignore_filter] set_matchers: write lock poisoned: {e}"
+        ),
     }
 }
 
@@ -238,10 +256,13 @@ impl IgnoreMatcher {
 }
 
 /// Returns `true` when `original_url` matches any installed ignore rule.
-/// Returns `false` if no matchers were installed (config absent / empty).
+/// Returns `false` if no matchers were installed (config absent / empty), or
+/// if the read lock is poisoned (fail-open — better to leak through one
+/// request than to flap into "everything ignored" because a writer panicked).
 pub fn is_ignored(original_url: &str) -> bool {
-    let Some(matchers) = IGNORE_MATCHERS.get() else {
-        return false;
+    let matchers = match IGNORE_MATCHERS.read() {
+        Ok(g) => g,
+        Err(_) => return false,
     };
     if matchers.is_empty() {
         return false;
