@@ -36,7 +36,7 @@ use tauri::{
     menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder},
     Manager, WebviewUrl, WebviewWindowBuilder,
 };
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::{fmt::time::ChronoLocal, EnvFilter};
 
 /// Menu item id for the "Open DevTools" entry. Matched in `on_menu_event` to
 /// dispatch into [`tauri::WebviewWindow::open_devtools`].
@@ -161,5 +161,6 @@ fn init_tracing() {
         EnvFilter::try_from_env("TAURI_HOOK_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
     let _ = tracing_subscriber::fmt()
         .with_env_filter(env_filter)
+        .with_timer(ChronoLocal::new("%Y-%m-%d %H:%M:%S".to_string()))
         .try_init();
 }
