@@ -3,9 +3,10 @@
 //! Resolution order (first hit wins, every step is non-fatal):
 //! 1. `argv[1]` if it parses as `http(s)://...` — handy for `cargo run -- https://...`.
 //! 2. `TAURI_HOOK_TARGET_URL` environment variable.
-//! 3. `hook.config.json`:
+//! 3. `hook.config.json` (resolved by [`crate::util::user_data_path`]):
 //!    - dev: `<CARGO_MANIFEST_DIR>/../hook.config.json` (i.e. repo root).
-//!    - prod: same directory as the running binary, then `./hook.config.json`.
+//!    - macOS prod: `~/Library/Application Support/Pouch/hook.config.json`.
+//!    - Windows / Linux prod: same directory as the running binary.
 //! 4. Built-in fallback: `https://www.leelib.com`.
 //!
 //! Failures at any step are logged at `warn` and we fall through to the next
@@ -20,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use crate::hook::ignore_filter::IgnoreEntry;
-use crate::util::pretty_path;
+use crate::util::{pretty_path, user_data_path, UserDataKind};
 
 /// Default fallback URL when no other source provides one.
 pub const DEFAULT_TARGET_URL: &str = "https://www.leelib.com";
@@ -88,6 +89,11 @@ impl Default for WindowConfig {
 /// `hook.config.json` file is still consulted (best-effort) to install
 /// `ignore_urls` rules into the global matcher set — `target_url` precedence
 /// (CLI > env > json > default) and `ignore_urls` loading are independent.
+///
+/// Safe to call multiple times: the ignore-rule installation is an atomic
+/// replace (see [`crate::hook::ignore_filter::set_matchers`]), so the runtime
+/// Reload path simply re-invokes [`load`] to pick up edits to
+/// `hook.config.json` without restarting.
 pub fn load() -> Config {
     // Always look at the JSON config first so its `ignore_urls` rules get
     // installed even when `target_url` is overridden via CLI / env.
@@ -169,7 +175,9 @@ fn from_env() -> Option<String> {
 ///   parsed successfully).
 ///
 /// Side-effect: when a candidate parses, also installs any `ignore_urls` rules
-/// into the global matcher set (see `hook::ignore_filter::init_from_entries`).
+/// into the global matcher set (see `hook::ignore_filter::set_matchers`),
+/// atomically replacing whatever was previously installed (so a Reload
+/// re-read picks up additions / removals / edits).
 fn from_config_file() -> (Option<(String, PathBuf)>, WindowConfig) {
     let mut window = WindowConfig::default();
     let mut target_url: Option<(String, PathBuf)> = None;
@@ -191,7 +199,13 @@ fn from_config_file() -> (Option<(String, PathBuf)>, WindowConfig) {
                                 entries.len()
                             );
                         }
-                        crate::hook::ignore_filter::init_from_entries(entries);
+                        crate::hook::ignore_filter::set_matchers(entries);
+                    } else {
+                        // No ignore_urls in the freshly-read file — wipe any
+                        // previous rule set so a Reload that *removes* the
+                        // field actually clears matchers (not just shadows
+                        // them).
+                        crate::hook::ignore_filter::set_matchers(&[]);
                     }
 
                     // Window config follows the same "first-hit wins" pattern
@@ -243,20 +257,22 @@ fn from_config_file() -> (Option<(String, PathBuf)>, WindowConfig) {
 }
 
 /// All locations we will try, in priority order.
+///
+/// In dev builds this resolves to `<CARGO_MANIFEST_DIR>/../hook.config.json`
+/// (the repo root). In macOS release builds it resolves to
+/// `~/Library/Application Support/Pouch/hook.config.json`. In Windows / Linux
+/// release builds it resolves to `<exe parent>/hook.config.json`.
+///
+/// `cwd / hook.config.json` is appended unconditionally as a last-ditch
+/// fallback for users running pouch from a directory that happens to contain
+/// a config file (rare but cheap to support).
 fn candidate_config_paths() -> Vec<PathBuf> {
     let mut out = Vec::new();
 
-    // Dev path: <CARGO_MANIFEST_DIR>/../hook.config.json — i.e. repo root.
-    // CARGO_MANIFEST_DIR is baked in at compile time via env! and is always
-    // available because this crate has a Cargo.toml.
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    out.push(manifest_dir.join("..").join("hook.config.json"));
-
-    // Prod path: same directory as the binary.
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            out.push(dir.join("hook.config.json"));
-        }
+    // Primary path — dev: repo root; macOS prod: ~/Library/.../Pouch/;
+    // Windows/Linux prod: <exe parent>/.
+    if let Some(p) = user_data_path(UserDataKind::Config) {
+        out.push(p);
     }
 
     // Fallback: relative to current working directory.

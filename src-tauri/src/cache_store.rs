@@ -212,10 +212,15 @@ pub struct Metadata {
 
 static CACHE_ROOT: OnceLock<PathBuf> = OnceLock::new();
 
-/// Returns the absolute path of the cache root (`<repo>/overrides`).
+/// Returns the absolute path of the cache root.
 ///
-/// Honours the `CACHE_ROOT_OVERRIDE` env var (used by tests). The directory is
-/// created on first call, and its absolute path is logged once at INFO.
+/// Resolution chain (see [`crate::util::user_data_dir`]):
+/// - dev: `<CARGO_MANIFEST_DIR>/../overrides`.
+/// - macOS prod: `~/Library/Application Support/Pouch/overrides`.
+/// - Windows / Linux prod: `<exe parent>/overrides`.
+///
+/// Honours the `CACHE_ROOT_OVERRIDE` env var (used by tests). The directory
+/// is created on first call, and its absolute path is logged once at INFO.
 pub fn cache_root() -> &'static Path {
     // Tests need to redirect the cache root per-test; honour the override every
     // call rather than caching it (the OnceLock is for the production path).
@@ -229,8 +234,12 @@ pub fn cache_root() -> &'static Path {
 
     CACHE_ROOT
         .get_or_init(|| {
-            let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-            let candidate = manifest_dir.join("..").join("overrides");
+            // Falls back to `./overrides` (cwd-relative) in the extremely
+            // unlikely case that none of the resolver tiers can give us a
+            // path — keeps cache_root() infallible like the rest of pouch's
+            // boot path.
+            let candidate = crate::util::user_data_dir(crate::util::UserDataKind::Overrides)
+                .unwrap_or_else(|| PathBuf::from("overrides"));
             if let Err(e) = std::fs::create_dir_all(&candidate) {
                 tracing::warn!(
                     "[hook] failed to create cache root {}: {}",

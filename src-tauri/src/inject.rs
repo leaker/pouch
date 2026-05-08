@@ -29,7 +29,7 @@ use std::path::PathBuf;
 
 use tracing::{info, warn};
 
-use crate::util::pretty_path;
+use crate::util::{pretty_path, user_data_dir, UserDataKind};
 
 /// One injection rule, parsed from a single `inject/<name>.js` file.
 #[derive(Debug, Clone)]
@@ -247,21 +247,21 @@ fn parse_frontmatter(content: &str) -> Option<(Option<String>, Vec<MatchPattern>
     Some((name, patterns))
 }
 
-/// Resolve the `inject/` directory the same way `config.rs` resolves
-/// `hook.config.json`: dev → exe-dir → cwd. First existing wins; `None` if
-/// nothing exists (caller falls into the zero-overhead path).
+/// Resolve the `inject/` directory.
+///
+/// Resolution chain matches the rest of pouch (see
+/// [`crate::util::user_data_dir`]):
+/// - dev: `<CARGO_MANIFEST_DIR>/../inject`.
+/// - macOS prod: `~/Library/Application Support/Pouch/inject`.
+/// - Windows / Linux prod: `<exe parent>/inject`.
+///
+/// We additionally try `./inject` relative to cwd as a last-ditch fallback
+/// (mirrors `config.rs`). Returns `None` when nothing exists; the caller
+/// then falls into the zero-overhead "no rules" path.
 fn resolve_inject_dir() -> Option<PathBuf> {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let dev = manifest_dir.join("..").join("inject");
-    if dev.is_dir() {
-        return Some(dev);
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(parent) = exe.parent() {
-            let cand = parent.join("inject");
-            if cand.is_dir() {
-                return Some(cand);
-            }
+    if let Some(primary) = user_data_dir(UserDataKind::Inject) {
+        if primary.is_dir() {
+            return Some(primary);
         }
     }
     let cwd = PathBuf::from("inject");

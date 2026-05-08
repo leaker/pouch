@@ -1,10 +1,16 @@
 //! Small cross-cutting utilities.
 //!
-//! Currently contains [`pretty_path`] — a *lexical* path normaliser used by
-//! every log call site that prints a filesystem path. Logs would otherwise
-//! show paths like `/Users/.../pouch/src-tauri/../inject/global.js`, which
-//! the user has to mentally collapse to `/Users/.../pouch/inject/global.js`
-//! when scanning startup output.
+//! Contents:
+//!
+//! - [`pretty_path`] — a *lexical* path normaliser used by every log call
+//!   site that prints a filesystem path. Logs would otherwise show paths
+//!   like `/Users/.../pouch/src-tauri/../inject/global.js`, which the user
+//!   has to mentally collapse to `/Users/.../pouch/inject/global.js` when
+//!   scanning startup output.
+//!
+//! - [`user_data_dir`] / [`UserDataKind`] — three-tier path resolver for the
+//!   user-visible `hook.config.json`, `inject/`, and `overrides/` data.
+//!   The resolution rules are documented on each function.
 //!
 //! Why "lexical" and not [`std::fs::canonicalize`]:
 //! - We log paths *before* I/O — sometimes for files that don't exist (e.g.
@@ -14,6 +20,132 @@
 //! - Lexical normalisation never touches the filesystem and never fails.
 
 use std::path::{Component, Path, PathBuf};
+
+/// Identifies which user-data slot a path resolver call is for. Used by
+/// [`user_data_dir`] / [`user_data_path`] only to log "for which slot" when
+/// helpful — the resolution rules do **not** branch on the variant.
+#[derive(Debug, Clone, Copy)]
+pub enum UserDataKind {
+    /// `inject/` directory containing `*.js` rules.
+    Inject,
+    /// `overrides/` directory used as the cache root.
+    Overrides,
+    /// `hook.config.json` (a file, not a directory — see
+    /// [`user_data_path`]).
+    Config,
+}
+
+impl UserDataKind {
+    /// Filesystem name relative to the parent dev/prod root. Returns
+    /// `"hook.config.json"` for [`UserDataKind::Config`] and the
+    /// directory name for the other two variants.
+    pub fn name(self) -> &'static str {
+        match self {
+            UserDataKind::Inject => "inject",
+            UserDataKind::Overrides => "overrides",
+            UserDataKind::Config => "hook.config.json",
+        }
+    }
+}
+
+/// macOS only: the per-app user-data root.
+///
+/// Returns `~/Library/Application Support/Pouch` (the canonical macOS
+/// per-user data directory for a non-sandboxed app), built by joining
+/// `$HOME` + `Library` + `Application Support` + `Pouch`. The two-segment
+/// `Library/Application Support` join (rather than a single string) keeps
+/// the directory name's literal space character intact and uses the OS's
+/// path separator everywhere.
+///
+/// Returns `None` if `$HOME` is missing — pouch then falls through to the
+/// portable `<exe parent>` layout, just like Linux/Windows.
+#[cfg(target_os = "macos")]
+pub fn macos_app_support_dir() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    Some(
+        PathBuf::from(home)
+            .join("Library")
+            .join("Application Support")
+            .join("Pouch"),
+    )
+}
+
+/// macOS only: open `~/Library/Application Support/Pouch/` in Finder.
+///
+/// Used by the menubar entry (`View → Reveal Pouch Folder in Finder`,
+/// Cmd+Shift+O) and the titlebar accessory button — both call this same
+/// helper so the behaviour stays in sync. We `open <dir>` rather than
+/// `open -R <file>` because the user wants to land *inside* the folder
+/// (so they can immediately drop in / inspect `inject/`, `overrides/`,
+/// `hook.config.json`), not "show the folder selected in its parent".
+///
+/// Creates the directory first if it doesn't exist yet (e.g. first launch
+/// where `bootstrap_macos_user_dir` somehow hasn't populated it) — Finder
+/// errors out on missing paths, and we'd rather just handle that case
+/// silently than surface a useless modal.
+#[cfg(target_os = "macos")]
+pub fn reveal_pouch_folder() -> std::io::Result<()> {
+    let path = macos_app_support_dir().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::NotFound, "$HOME unavailable")
+    })?;
+    if !path.exists() {
+        std::fs::create_dir_all(&path)?;
+    }
+    std::process::Command::new("open").arg(&path).spawn()?;
+    Ok(())
+}
+
+/// Resolve the runtime path for a user-data slot.
+///
+/// Resolution chain (first hit wins, the same shape used by config / inject /
+/// cache_store before this helper landed):
+///
+/// 1. **Dev mode** (`debug_assertions`): `<CARGO_MANIFEST_DIR>/../<name>` —
+///    i.e. the in-repo directory next to `src-tauri/`. Always returned;
+///    the file/directory may or may not exist on disk yet.
+/// 2. **macOS prod** (`cfg(target_os = "macos")`, `not(debug_assertions)`):
+///    `~/Library/Application Support/Pouch/<name>`. Falls through to step 3
+///    if `$HOME` is unset (very unusual — but pouch should still boot).
+/// 3. **Portable prod** (Windows / Linux release; macOS fallback):
+///    `<current_exe parent>/<name>`. If `current_exe()` itself fails we
+///    return `None` and the caller treats it as "not found".
+///
+/// The returned path is **lexically only** — it is not guaranteed to exist.
+/// Callers that care use `Path::is_dir()` / `Path::exists()` themselves.
+///
+/// `kind` selects the leaf name (`"inject"`, `"overrides"`, or
+/// `"hook.config.json"`); the resolution rules are otherwise identical
+/// across all three.
+pub fn user_data_path(kind: UserDataKind) -> Option<PathBuf> {
+    if cfg!(debug_assertions) {
+        // Step 1: dev. CARGO_MANIFEST_DIR is baked at compile time (always
+        // available — every cargo target has a Cargo.toml).
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        return Some(manifest_dir.join("..").join(kind.name()));
+    }
+
+    // Release builds. macOS first (with $HOME fallback to the portable
+    // layout), then Windows / Linux portable.
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(root) = macos_app_support_dir() {
+            return Some(root.join(kind.name()));
+        }
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            return Some(parent.join(kind.name()));
+        }
+    }
+    None
+}
+
+/// Resolve a *directory* slot only. Convenience wrapper around
+/// [`user_data_path`] for callers that already know the slot is a dir.
+pub fn user_data_dir(kind: UserDataKind) -> Option<PathBuf> {
+    user_data_path(kind)
+}
 
 /// Make a path log-friendly: absolutise relative paths against the current
 /// working directory (best-effort) and lexically collapse `.` / `..` segments.
@@ -157,5 +289,86 @@ mod tests {
         // (current_dir() fail path); never an intermediate state.
         let expected = lexical_normalize(&cwd.join("inject/global.js"));
         assert_eq!(pretty, expected);
+    }
+
+    #[test]
+    fn user_data_kind_name_matches_slot() {
+        assert_eq!(UserDataKind::Inject.name(), "inject");
+        assert_eq!(UserDataKind::Overrides.name(), "overrides");
+        assert_eq!(UserDataKind::Config.name(), "hook.config.json");
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn user_data_path_dev_points_into_repo_root() {
+        // Dev build: every slot resolves to <CARGO_MANIFEST_DIR>/../<name>.
+        // We don't canonicalize — the path is only required to exist
+        // lexically, so we compare byte-for-byte against what config.rs /
+        // inject.rs / cache_store.rs constructed before the helper landed.
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        for (kind, name) in [
+            (UserDataKind::Inject, "inject"),
+            (UserDataKind::Overrides, "overrides"),
+            (UserDataKind::Config, "hook.config.json"),
+        ] {
+            let got = user_data_path(kind).expect("dev path is always Some");
+            assert_eq!(got, manifest_dir.join("..").join(name));
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn user_data_dir_matches_user_data_path() {
+        // user_data_dir is just a convenience alias; the contract is "same
+        // result as user_data_path".
+        for kind in [UserDataKind::Inject, UserDataKind::Overrides, UserDataKind::Config] {
+            assert_eq!(user_data_dir(kind), user_data_path(kind));
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_app_support_dir_behaviour() {
+        // Run both HOME-mutating macos checks inside one test to avoid the
+        // env-var race that two parallel #[test]s would have under cargo's
+        // default `--test-threads=N` scheduling. We restore HOME at the end.
+        let prev = std::env::var_os("HOME");
+
+        // Case 1: $HOME set → returns a path whose tail is exactly
+        // `Library/Application Support/Pouch`, with the space-bearing
+        // directory kept as a single OS path component.
+        std::env::set_var("HOME", "/Users/testuser");
+        let dir = macos_app_support_dir().expect("HOME is set");
+        let s = dir.to_string_lossy();
+        assert!(s.ends_with("/Library/Application Support/Pouch"), "got {s}");
+        let comps: Vec<_> = dir
+            .components()
+            .filter_map(|c| match c {
+                Component::Normal(n) => n.to_str(),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            comps.contains(&"Application Support"),
+            "expected 'Application Support' as a single component, got {comps:?}"
+        );
+
+        // Case 2: $HOME unset → None (caller falls back to portable layout).
+        std::env::remove_var("HOME");
+        assert!(macos_app_support_dir().is_none());
+
+        // Case 3: reveal_pouch_folder propagates the missing-HOME case as a
+        // NotFound io::Error rather than silently spawning `open` against a
+        // bogus path. (The happy path actually invokes `open`, which would
+        // launch Finder mid-test — we deliberately do NOT exercise that.)
+        let err =
+            reveal_pouch_folder().expect_err("reveal_pouch_folder must fail without HOME");
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+
+        // Restore.
+        match prev {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
     }
 }
