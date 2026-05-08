@@ -3,6 +3,8 @@
 
 use std::sync::OnceLock;
 
+use tracing::trace;
+
 /// Conditional request headers stripped before forwarding upstream.
 ///
 /// Why: WebKit's HTTP cache adds these (e.g. `If-None-Match`,
@@ -62,12 +64,101 @@ pub async fn fetch(
         clean_headers.remove(*name);
     }
 
-    client()
+    // [CORS-DEBUG] Dump the headers we are about to send upstream. This is
+    // the critical hypothesis-discriminator: if `Origin` is missing here
+    // (whether because WKWebView never gave it to us, or because it was
+    // dropped along the way) the upstream CDN will not echo back
+    // Access-Control-Allow-Origin and the webview's CORS check will fail.
+    //
+    // Grep:
+    //   outgoing_request_headers url=
+    //   outgoing_origin=
+    trace!(
+        target: "hook",
+        "outgoing_request_headers url={} count={}",
+        url,
+        clean_headers.len()
+    );
+    for (name, value) in clean_headers.iter() {
+        trace!(
+            target: "hook",
+            "  outgoing_header url={} {}={}",
+            url,
+            name.as_str(),
+            value.to_str().unwrap_or("<non-ascii>")
+        );
+    }
+    let outgoing_origin = clean_headers
+        .get("origin")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("<absent>");
+    let outgoing_referer = clean_headers
+        .get("referer")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("<absent>");
+    trace!(
+        target: "hook",
+        "fetch_outgoing url={} outgoing_origin={} outgoing_referer={}",
+        url, outgoing_origin, outgoing_referer
+    );
+
+    let response = client()
         .get(url)
         .headers(clean_headers)
         .header("X-Hook-Bypass", "1")
         .send()
-        .await
+        .await?;
+
+    // [CORS-DEBUG] Dump every response header from upstream. If
+    // `Access-Control-Allow-Origin` is missing here, the problem is on
+    // the upstream side (most likely H1 — origin not echoed because we
+    // didn't send it). If it is present, the problem is downstream
+    // (forward_response_headers blacklist or NSHTTPURLResponse delivery).
+    //
+    // Grep:
+    //   upstream_response_headers url=
+    //   upstream_acao=
+    //   upstream_vary=
+    let resp_headers = response.headers();
+    trace!(
+        target: "hook",
+        "upstream_response_headers url={} status={} count={}",
+        url,
+        response.status(),
+        resp_headers.len()
+    );
+    for (name, value) in resp_headers.iter() {
+        trace!(
+            target: "hook",
+            "  upstream_header url={} {}={}",
+            url,
+            name.as_str(),
+            value.to_str().unwrap_or("<non-ascii>")
+        );
+    }
+    let upstream_acao = resp_headers
+        .get("access-control-allow-origin")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("<absent>");
+    let upstream_vary = resp_headers
+        .get("vary")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("<absent>");
+    let upstream_acac = resp_headers
+        .get("access-control-allow-credentials")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("<absent>");
+    trace!(
+        target: "hook",
+        "fetch_response url={} status={} upstream_acao={} upstream_vary={} upstream_acac={}",
+        url,
+        response.status(),
+        upstream_acao,
+        upstream_vary,
+        upstream_acac
+    );
+
+    Ok(response)
 }
 
 #[cfg(test)]

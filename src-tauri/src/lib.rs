@@ -508,7 +508,11 @@ pub fn run() {
             static EXITING: AtomicBool = AtomicBool::new(false);
 
             app.run(|_app_handle, event| {
-                tracing::trace!(target: "hook", "[runevent] {:?}", event);
+                // skip MainEventsCleared 这种每帧都 fire 的 noise event，否则 trace log 被淹没
+                match &event {
+                    tauri::RunEvent::MainEventsCleared => {}
+                    _ => tracing::trace!(target: "hook", "[runevent] {:?}", event),
+                }
                 if let tauri::RunEvent::ExitRequested { code, .. } = event {
                     // Tauri 在所有 window 关闭后发出 ExitRequested（macOS 不自动退）。
                     // hook-tokio runtime 是 OnceLock 永不 drop，无法 graceful shutdown，

@@ -262,6 +262,54 @@ define_class!(
                 }
             };
 
+            // [CORS-DEBUG] Dump every header WKWebView attached to this
+            // request. Looking specifically for `Origin` / `Referer` /
+            // `User-Agent` to validate hypothesis H1 (we never forward
+            // Origin upstream → CDN omits ACAO → webview rejects with the
+            // exact symptom the user reports).
+            //
+            // Grep:
+            //   incoming_request_headers
+            //   incoming_origin=
+            //   incoming_referer=
+            trace!(
+                target: "hook",
+                "[mac] incoming_request_headers url={} count={}",
+                short_url(&url_str),
+                header_map.len()
+            );
+            for (name, value) in header_map.iter() {
+                trace!(
+                    target: "hook",
+                    "[mac]   incoming_header url={} {}={}",
+                    short_url(&url_str),
+                    name.as_str(),
+                    value.to_str().unwrap_or("<non-ascii>")
+                );
+            }
+            // Easy-to-grep summary line for the three headers that decide
+            // CORS handling upstream.
+            let incoming_origin = header_map
+                .get("origin")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("<absent>");
+            let incoming_referer = header_map
+                .get("referer")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("<absent>");
+            let incoming_ua = header_map
+                .get("user-agent")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("<absent>");
+            trace!(
+                target: "hook",
+                "[mac] startLoading_cors url={} incoming_origin={} incoming_referer={} incoming_user_agent={}",
+                short_url(&url_str),
+                incoming_origin,
+                incoming_referer,
+                incoming_ua
+            );
+
             // Retain self; the policy task holds onto this until its main-thread
             // callback fires the client callbacks. `Retained` is Send/Sync for
             // immutable Objective-C objects and for our purposes (we only call
@@ -389,10 +437,55 @@ fn deliver_respond(
         short_url(url),
         body.len()
     );
+
+    // [CORS-DEBUG] Dump every (name, value) pair we are about to install
+    // into the NSHTTPURLResponse handed back to WKWebView. This is the
+    // last chance to see what the webview will actually evaluate against
+    // the same-origin / CORS policy.
+    //
+    // Grep:
+    //   deliver_extra_headers url=
+    //   deliver_acao=
+    let deliver_acao = extra_headers
+        .iter()
+        .find(|(n, _)| n.eq_ignore_ascii_case("access-control-allow-origin"))
+        .map(|(_, v)| v.as_str())
+        .unwrap_or("<absent>");
+    trace!(
+        target: "hook",
+        "[mac] deliver_extra_headers url={} count={} deliver_acao={}",
+        short_url(url),
+        extra_headers.len(),
+        deliver_acao
+    );
+    for (name, value) in extra_headers {
+        trace!(
+            target: "hook",
+            "[mac]   deliver_header url={} {}={}",
+            short_url(url),
+            name, value
+        );
+    }
+
     let url_ns = make_nsurl(url).ok_or_else(|| format!("invalid URL: {url}"))?;
 
     let header_dict = build_response_header_dict(content_type.as_deref(), body.len(), extra_headers);
     let http_version = NSString::from_str("HTTP/1.1");
+
+    // [CORS-DEBUG H8] Capture the dict size we *built* before handing it to
+    // NSHTTPURLResponse, so we can compare against the dict the constructed
+    // response actually retains. If `built_dict_count` differs from the
+    // count we get back from `allHeaderFields()` after construction,
+    // something inside NSHTTPURLResponse stripped headers (H8-2 candidate).
+    //
+    // Grep: built_dict_count
+    let built_dict_count = header_dict.count();
+    trace!(
+        target: "hook",
+        "[mac] built_dict_count url={} built_dict_count={}",
+        short_url(url),
+        built_dict_count
+    );
 
     let response = NSHTTPURLResponse::initWithURL_statusCode_HTTPVersion_headerFields(
         NSHTTPURLResponse::alloc(),
@@ -403,15 +496,130 @@ fn deliver_respond(
     )
     .ok_or_else(|| "NSHTTPURLResponse allocation failed".to_string())?;
 
+    // [CORS-DEBUG H8] Reverse-read the headers WebKit will see on the
+    // NSHTTPURLResponse. WebKit's NetworkProcess (private API path through
+    // WKBrowsingContextController + NSURLProtocol) is suspected of
+    // rebuilding / stripping the dict between UI process and renderer; this
+    // log shows whether the rot is in our build (count differs from
+    // `built_dict_count`) or downstream (count matches but DevTools shows
+    // zero).
+    //
+    // Also probes statusCode separately — DevTools "Status: —" hints the
+    // entire response object isn't propagating, not just headers.
+    //
+    // Grep:
+    //   nsresponse_actual_headers
+    //   nsresponse_actual_header
+    //   nsresponse_status
+    //   nsresponse_acao_probe
+    {
+        use objc2::msg_send;
+        use objc2::runtime::AnyObject;
+
+        let status_code = response.statusCode();
+        let actual_dict: Retained<NSDictionary> = response.allHeaderFields();
+        let actual_count = actual_dict.count();
+        trace!(
+            target: "hook",
+            "[mac] nsresponse_actual_headers url={} count={} status={} built={}",
+            short_url(url),
+            actual_count,
+            status_code,
+            built_dict_count
+        );
+
+        // Walk the dict by `allKeys` -> `objectForKey:`. The dict is
+        // untyped (NSDictionary, not NSDictionary<NSString,NSString>) so we
+        // call through msg_send to keep this purely diagnostic.
+        let keys: Retained<objc2_foundation::NSArray> =
+            unsafe { msg_send![&*actual_dict, allKeys] };
+        let key_count: usize = unsafe { msg_send![&*keys, count] };
+        for i in 0..key_count {
+            let k_obj: *mut AnyObject = unsafe { msg_send![&*keys, objectAtIndex: i] };
+            if k_obj.is_null() {
+                continue;
+            }
+            let v_obj: *mut AnyObject =
+                unsafe { msg_send![&*actual_dict, objectForKey: k_obj] };
+            // Best-effort stringify: ask the object for its `description`
+            // (NSString*) regardless of underlying type. NSString returns
+            // self; everything else returns a useful debug rendering.
+            let k_desc: *mut NSString = unsafe { msg_send![k_obj, description] };
+            let v_desc: *mut NSString = if v_obj.is_null() {
+                std::ptr::null_mut()
+            } else {
+                unsafe { msg_send![v_obj, description] }
+            };
+            let k_str = if k_desc.is_null() {
+                "<nil-key>".to_string()
+            } else {
+                unsafe { (*k_desc).to_string() }
+            };
+            let v_str = if v_desc.is_null() {
+                "<nil-val>".to_string()
+            } else {
+                unsafe { (*v_desc).to_string() }
+            };
+            trace!(
+                target: "hook",
+                "[mac]   nsresponse_actual_header url={} {}={}",
+                short_url(url),
+                k_str,
+                v_str
+            );
+        }
+
+        // Direct ACAO probe via the public case-insensitive accessor — if
+        // this returns None even though we joined `Access-Control-Allow-Origin`
+        // into the dict, NSHTTPURLResponse silently dropped it (H8-2).
+        let acao_key = NSString::from_str("Access-Control-Allow-Origin");
+        let acao_probe = response
+            .valueForHTTPHeaderField(&acao_key)
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "<absent>".to_string());
+        trace!(
+            target: "hook",
+            "[mac] nsresponse_acao_probe url={} value={}",
+            short_url(url),
+            acao_probe
+        );
+    }
+
+    trace!(
+        target: "hook",
+        "[mac] before_didReceiveResponse url={}",
+        short_url(url)
+    );
     client.URLProtocol_didReceiveResponse_cacheStoragePolicy(
         protocol.as_super(),
         response.as_super(),
         NSURLCacheStoragePolicy::NotAllowed,
     );
+    trace!(
+        target: "hook",
+        "[mac] after_didReceiveResponse url={}",
+        short_url(url)
+    );
 
     let data = NSData::with_bytes(body);
+    trace!(
+        target: "hook",
+        "[mac] before_didLoadData url={} body_len={}",
+        short_url(url),
+        body.len()
+    );
     client.URLProtocol_didLoadData(protocol.as_super(), &data);
+    trace!(
+        target: "hook",
+        "[mac] before_didFinishLoading url={}",
+        short_url(url)
+    );
     client.URLProtocolDidFinishLoading(protocol.as_super());
+    trace!(
+        target: "hook",
+        "[mac] after_didFinishLoading url={}",
+        short_url(url)
+    );
     Ok(())
 }
 
