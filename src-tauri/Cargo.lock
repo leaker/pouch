@@ -2513,7 +2513,7 @@ dependencies = [
 
 [[package]]
 name = "pouch"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "block2",
  "chrono",
