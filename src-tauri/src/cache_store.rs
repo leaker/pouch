@@ -74,9 +74,15 @@ pub fn cache_root() -> &'static Path {
             let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
             let candidate = manifest_dir.join("..").join("overrides");
             if let Err(e) = std::fs::create_dir_all(&candidate) {
-                tracing::warn!("[hook] failed to create cache root {:?}: {}", candidate, e);
+                tracing::warn!(
+                    "[hook] failed to create cache root {}: {}",
+                    crate::util::pretty_path(&candidate).display(),
+                    e
+                );
             }
-            let resolved = candidate.canonicalize().unwrap_or(candidate);
+            let resolved = candidate
+                .canonicalize()
+                .unwrap_or_else(|_| crate::util::pretty_path(&candidate));
             tracing::info!("[hook] cache root: {}", resolved.display());
             resolved
         })

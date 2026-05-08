@@ -29,6 +29,8 @@ use std::path::PathBuf;
 
 use tracing::{info, warn};
 
+use crate::util::pretty_path;
+
 /// One injection rule, parsed from a single `inject/<name>.js` file.
 #[derive(Debug, Clone)]
 pub struct InjectRule {
@@ -65,7 +67,7 @@ pub fn scan_inject_dir() -> Vec<InjectRule> {
     let Some(dir) = resolve_inject_dir() else {
         return Vec::new();
     };
-    info!(target: "hook", "[inject] scanning {}", dir.display());
+    info!(target: "hook", "[inject] scanning {}", pretty_path(&dir).display());
 
     let mut entries: Vec<PathBuf> = match std::fs::read_dir(&dir) {
         Ok(rd) => rd
@@ -74,7 +76,7 @@ pub fn scan_inject_dir() -> Vec<InjectRule> {
             .filter(|p| p.is_file() && p.extension().map(|x| x == "js").unwrap_or(false))
             .collect(),
         Err(e) => {
-            warn!(target: "hook", "[inject] read_dir({}) failed: {}", dir.display(), e);
+            warn!(target: "hook", "[inject] read_dir({}) failed: {}", pretty_path(&dir).display(), e);
             return Vec::new();
         }
     };
@@ -95,7 +97,7 @@ pub fn scan_inject_dir() -> Vec<InjectRule> {
                         "[inject] loaded rule {:?} ({} pattern(s)) from {}",
                         resolved_name,
                         patterns.len(),
-                        path.display()
+                        pretty_path(&path).display()
                     );
                     rules.push(InjectRule {
                         name: resolved_name,
@@ -106,13 +108,13 @@ pub fn scan_inject_dir() -> Vec<InjectRule> {
                 None => warn!(
                     target: "hook",
                     "[inject] skipped {}: no UserScript frontmatter or no @match entries",
-                    path.display()
+                    pretty_path(&path).display()
                 ),
             },
             Err(e) => warn!(
                 target: "hook",
                 "[inject] failed to read {}: {}",
-                path.display(),
+                pretty_path(&path).display(),
                 e
             ),
         }

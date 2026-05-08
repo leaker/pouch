@@ -30,6 +30,7 @@ pub mod config;
 pub mod hook;
 pub mod http_fetcher;
 pub mod inject;
+pub mod util;
 
 use tauri::{WebviewUrl, WebviewWindowBuilder};
 use tracing_subscriber::EnvFilter;

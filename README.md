@@ -143,7 +143,7 @@ TAURI_HOOK_LOG=hook=debug bun run tauri dev
 │       ├── cache_store     atomic write + sidecar metadata   │
 │       ├── http_fetcher    reqwest + rustls + strip          │
 │       │                   conditional headers               │
-│       └── ignore_filter   4 default blacklist patterns      │
+│       └── ignore_filter   config-driven blacklist           │
 └──────────────────┬──────────────────────────────────────────┘
                    │
                    ▼
@@ -230,6 +230,7 @@ Fields:
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `target_url` | string (`http://` or `https://`) | No (falls through the priority chain when missing) | The real URL the main webview navigates to on launch (`WebviewUrl::External(target_url)`) |
+| `ignore_urls` | array of entries (one of `suffix` / `wildcard` / `url_wildcard` / `url_regex`, plus optional `comment`) | No (missing/`null`/`[]` = no filtering) | Per-entry blacklist; matched URLs are fetched but never cached. See §4.3 for the four entry shapes. |
 
 ### 4.2 Priority chain
 
@@ -253,24 +254,36 @@ INFO hook: [config] target_url from /path/to/hook.config.json: https://...
 
 > Design note: an earlier internal design called for "panic on missing config", but this was relaxed to "log + fall through" so that Pouch runs out of the box after a clone. If you want strict fail-fast behaviour, change `config::load` in your fork.
 
-### 4.3 Default ignoreUrls blacklist
+### 4.3 `ignore_urls` blacklist
 
 Source: [`src-tauri/src/hook/ignore_filter.rs`](src-tauri/src/hook/ignore_filter.rs)
 
-Four hard-coded regexes:
+Rules are loaded entirely from `hook.config.json`'s optional `ignore_urls` array — the Rust source ships **no built-in defaults**. Missing field, `null`, or `[]` all mean "no filtering". A match means "**fetch but do not write**": the upstream response is still retrieved and handed to the webview, but the local cache is neither read nor written. The intent is to let implicit browser-emitted telemetry / font requests pass through without polluting `overrides/`.
 
-```rust
-const DEFAULT_PATTERNS: &[&str] = &[
-    r"^https?://[^/]*gstatic\.com/",
-    r"^https?://[^/]*google\.com/",
-    r"^https?://[^/]*googletagmanager\.com/",
-    r"^https?://[^/]*google-analytics\.com/",
-];
+```json
+{
+  "ignore_urls": [
+    { "suffix": "gstatic.com",          "comment": "Google static asset CDN (apex + all subdomains)" },
+    { "suffix": "googletagmanager.com", "comment": "GTM / GA injection scripts" },
+    { "suffix": "google-analytics.com", "comment": "GA reporting endpoint" },
+    { "suffix": "cdn.jsdelivr.net",     "comment": "Public npm CDN" },
+    { "wildcard": "*.google.com",       "comment": "google.com subdomains only (apex excluded)" },
+    { "url_wildcard": "https://example.com/api/*", "comment": "URL glob; * does not cross /" },
+    { "url_regex": "^https://example\\.com/track/.*", "comment": "full-URL regex; caller controls anchors" }
+  ]
+}
 ```
 
-A match means "**fetch but do not write**" — the upstream response is still retrieved and handed to the webview, but the local cache is neither read nor written. The intent of this default set is to let implicit browser-emitted telemetry / font requests pass through without polluting `overrides/`.
+Each entry has **exactly one** of the following four keys — the field name *is* the variant tag (no magic prefix strings on the value). An optional `comment` is documentation-only and ignored at runtime.
 
-> **Known false positive**: `[^/]*google\.com/` also matches domains containing `google.com` as a substring, like `notgoogle.com` or `mygoogleads.com`. This is a known defect kept as-is for the default ignore list. If your scenario hits one of these neighbours, tighten the regex to `^https?://[^/]+\.google\.com/`.
+| Field          | Match domain | Semantics                                                                                                                                |
+|----------------|--------------|------------------------------------------------------------------------------------------------------------------------------------------|
+| `suffix`       | host         | Host suffix, **apex included**. `gstatic.com` matches both `gstatic.com` and `fonts.gstatic.com` (but not `notgstatic.com`).             |
+| `wildcard`     | host         | Host glob; `*` matches a single label segment and **does not cross `.`**. `*.google.com` matches `fonts.google.com` but **not** `google.com` itself — write a separate `suffix` entry if you need the apex. `ads.*.com` matches `ads.foo.com` but not `ads.foo.bar.com`. |
+| `url_wildcard` | full URL     | URL glob; `*` matches a non-`/` run and **does not cross `/`**. All other regex meta is escaped. Auto-anchored at both ends.             |
+| `url_regex`    | full URL     | Raw `regex::Regex` against the full URL. **Not** auto-anchored — the caller controls `^` / `$`.                                          |
+
+Host comparisons parse the URL via the `url` crate, so scheme / port / path / IPv6 brackets are handled correctly. Individual entries that fail to compile (invalid regex, empty / blank value) are warned and skipped without aborting the rest of the list. An entry that omits all four keys, supplies more than one, or uses an unknown key fails JSON parsing for the whole `ignore_urls` array — the loader then warns and falls through with no rules installed.
 
 > **NSURLProtocol constraint behind "fetch but no write"**: see the module docs in [`policy.rs`](src-tauri/src/hook/policy.rs). Once macOS `-startLoading` has been called, the subclass **must** produce a response — there is no NSURLProtocol API to "let go mid-load and fall back to the default loader" — so even on an ignore-list hit we still fetch the body via reqwest and hand it back. The Windows path follows the same semantics so the policy layer can be shared.
 
@@ -520,7 +533,7 @@ pouch/
 │       ├── http_fetcher.rs   # reqwest + rustls + strip conditional headers
 │       └── hook/
 │           ├── mod.rs
-│           ├── ignore_filter.rs    # 4 default blacklist patterns
+│           ├── ignore_filter.rs    # config-driven ignore_urls matchers
 │           ├── policy.rs           # Decision::{Respond, Bypass} shared business logic
 │           └── platform/
 │               ├── mod.rs          # cfg dispatch; install_global / install_for_webview

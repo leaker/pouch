@@ -19,6 +19,9 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
+use crate::hook::ignore_filter::IgnoreEntry;
+use crate::util::pretty_path;
+
 /// Default fallback URL when no other source provides one.
 pub const DEFAULT_TARGET_URL: &str = "https://www.leelib.com";
 
@@ -29,16 +32,29 @@ pub struct Config {
 }
 
 /// On-disk schema for `hook.config.json`. Kept separate from `Config` so
-/// future fields (e.g. `ignore_urls`) can be optional in the file but
-/// always-resolved at runtime.
+/// future fields can be optional in the file but always-resolved at runtime.
 #[derive(Debug, Deserialize)]
 struct ConfigFile {
     target_url: Option<String>,
+    /// Optional ignoreUrls list — see `hook/ignore_filter.rs` for the
+    /// per-entry pattern syntax. Compiled into the global matcher set at
+    /// startup; missing/null/empty all mean "no filtering".
+    #[serde(default)]
+    ignore_urls: Option<Vec<IgnoreEntry>>,
 }
 
 /// Load the runtime configuration following the resolution chain documented
 /// at the module level. Never panics.
+///
+/// Side effect: regardless of which source supplies `target_url`, the
+/// `hook.config.json` file is still consulted (best-effort) to install
+/// `ignore_urls` rules into the global matcher set — `target_url` precedence
+/// (CLI > env > json > default) and `ignore_urls` loading are independent.
 pub fn load() -> Config {
+    // Always look at the JSON config first so its `ignore_urls` rules get
+    // installed even when `target_url` is overridden via CLI / env.
+    let json_target_url = from_config_file();
+
     if let Some(url) = from_cli_args() {
         info!(target: "hook", "[config] target_url from CLI arg: {}", url);
         return Config { target_url: url };
@@ -49,11 +65,11 @@ pub fn load() -> Config {
         return Config { target_url: url };
     }
 
-    if let Some((url, path)) = from_config_file() {
+    if let Some((url, path)) = json_target_url {
         info!(
             target: "hook",
             "[config] target_url from {}: {}",
-            path.display(),
+            pretty_path(&path).display(),
             url
         );
         return Config { target_url: url };
@@ -97,29 +113,49 @@ fn from_env() -> Option<String> {
 }
 
 /// Find and parse `hook.config.json`, returning the resolved URL plus the path
-/// we read it from (for logging).
+/// we read it from (for logging). Side-effect: when a candidate parses, also
+/// installs any `ignore_urls` rules into the global matcher set (see
+/// `hook::ignore_filter::init_from_entries`).
 fn from_config_file() -> Option<(String, PathBuf)> {
     for candidate in candidate_config_paths() {
         match std::fs::read_to_string(&candidate) {
             Ok(text) => match serde_json::from_str::<ConfigFile>(&text) {
-                Ok(parsed) => match parsed.target_url {
-                    Some(url) if looks_like_url(&url) => return Some((url, candidate)),
-                    Some(url) => warn!(
-                        target: "hook",
-                        "[config] {} target_url is not an http(s) URL: {:?}",
-                        candidate.display(),
-                        url
-                    ),
-                    None => warn!(
-                        target: "hook",
-                        "[config] {} has no target_url field",
-                        candidate.display()
-                    ),
-                },
+                Ok(parsed) => {
+                    // Install ignore_urls regardless of whether target_url is
+                    // present/valid — these are independent concerns and we
+                    // want filtering active even if target_url falls through
+                    // to env/default.
+                    if let Some(entries) = parsed.ignore_urls.as_deref() {
+                        if !entries.is_empty() {
+                            info!(
+                                target: "hook",
+                                "[config] {} ignore_urls = {} entrie(s)",
+                                pretty_path(&candidate).display(),
+                                entries.len()
+                            );
+                        }
+                        crate::hook::ignore_filter::init_from_entries(entries);
+                    }
+
+                    match parsed.target_url {
+                        Some(url) if looks_like_url(&url) => return Some((url, candidate)),
+                        Some(url) => warn!(
+                            target: "hook",
+                            "[config] {} target_url is not an http(s) URL: {:?}",
+                            pretty_path(&candidate).display(),
+                            url
+                        ),
+                        None => warn!(
+                            target: "hook",
+                            "[config] {} has no target_url field",
+                            pretty_path(&candidate).display()
+                        ),
+                    }
+                }
                 Err(e) => warn!(
                     target: "hook",
                     "[config] failed to parse {}: {}",
-                    candidate.display(),
+                    pretty_path(&candidate).display(),
                     e
                 ),
             },
@@ -129,7 +165,7 @@ fn from_config_file() -> Option<(String, PathBuf)> {
             Err(e) => warn!(
                 target: "hook",
                 "[config] failed to read {}: {}",
-                candidate.display(),
+                pretty_path(&candidate).display(),
                 e
             ),
         }
