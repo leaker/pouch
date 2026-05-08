@@ -200,7 +200,7 @@ pub fn should_cache(cache_control: Option<&str>) -> CachePolicy {
 }
 
 /// Sidecar metadata recorded alongside each cached file.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct Metadata {
     pub original_url: String,
     pub content_type: Option<String>,
@@ -208,6 +208,20 @@ pub struct Metadata {
     pub last_modified: Option<String>,
     /// ISO 8601 timestamp of when the entry was written.
     pub saved_at: String,
+
+    /// Headers from the upstream response that were forwarded to the webview
+    /// at cache write time. Excludes `Set-Cookie` (replay would leak stale
+    /// session cookies) and the hop-by-hop blacklist already filtered by
+    /// `forward_response_headers`. These are replayed verbatim on cache HIT
+    /// so CORS / Cache-Control / X-Frame-Options / CSP / Vary stay consistent
+    /// between the first MISS response and subsequent HITs.
+    ///
+    /// `#[serde(default)]` keeps old sidecars (written before this field
+    /// existed) deserialising cleanly — they fall back to an empty vec, which
+    /// preserves the pre-fix HIT behaviour for already-cached entries until
+    /// the user clears overrides/.
+    #[serde(default)]
+    pub forwarded_headers: Vec<(String, String)>,
 }
 
 static CACHE_ROOT: OnceLock<PathBuf> = OnceLock::new();
@@ -384,6 +398,7 @@ mod tests {
             etag: Some("\"abc\"".to_string()),
             last_modified: Some("Wed, 01 Jan 2025 00:00:00 GMT".to_string()),
             saved_at: "2026-05-06T12:00:00Z".to_string(),
+            forwarded_headers: Vec::new(),
         }
     }
 
@@ -635,6 +650,64 @@ mod tests {
             assert!(!root.join("example.com/p%20q.png").exists());
             let (body, _) = read("example.com/p%20q.png").await.unwrap();
             assert_eq!(body, b"img");
+        })
+        .await;
+
+        // 12) forwarded_headers round-trip: write a sidecar containing CORS /
+        //     Cache-Control / Vary entries and verify read returns them as a
+        //     Vec<(String, String)> with order preserved. This is the cache
+        //     HIT replay path's source of truth.
+        with_temp_root(|_root| async move {
+            let mut m = meta_for("https://api.example.com/data");
+            m.forwarded_headers = vec![
+                (
+                    "Access-Control-Allow-Origin".to_string(),
+                    "https://app.example.com".to_string(),
+                ),
+                ("Cache-Control".to_string(), "max-age=3600".to_string()),
+                ("Vary".to_string(), "Accept-Encoding".to_string()),
+            ];
+            write("api.example.com/data", b"{}", &m).await.unwrap();
+            let (_body, got) = read("api.example.com/data").await.unwrap();
+            assert_eq!(got.forwarded_headers, m.forwarded_headers);
+        })
+        .await;
+
+        // 13) Backward-compat: a sidecar written before the
+        //     `forwarded_headers` field existed must still deserialise. The
+        //     `#[serde(default)]` attribute makes the field optional and
+        //     falls back to an empty Vec — old entries on disk continue to
+        //     work, just without HIT-path header replay until they're
+        //     refreshed.
+        with_temp_root(|root| async move {
+            let body_target = root.join("legacy.example.com/old.txt");
+            tokio::fs::create_dir_all(body_target.parent().unwrap())
+                .await
+                .unwrap();
+            tokio::fs::write(&body_target, b"legacy").await.unwrap();
+            // Hand-crafted JSON missing `forwarded_headers` — mirrors a
+            // sidecar produced by an older pouch build.
+            let legacy_json = br#"{
+                "original_url": "https://legacy.example.com/old.txt",
+                "content_type": "text/plain",
+                "etag": null,
+                "last_modified": null,
+                "saved_at": "2026-05-01T00:00:00Z"
+            }"#;
+            tokio::fs::write(
+                root.join("legacy.example.com/old.txt.meta.json"),
+                legacy_json,
+            )
+            .await
+            .unwrap();
+            let (body, meta) = read("legacy.example.com/old.txt").await.unwrap();
+            assert_eq!(body, b"legacy");
+            assert!(
+                meta.forwarded_headers.is_empty(),
+                "legacy sidecar must default to empty forwarded_headers, got {:?}",
+                meta.forwarded_headers
+            );
+            assert_eq!(meta.content_type.as_deref(), Some("text/plain"));
         })
         .await;
     }

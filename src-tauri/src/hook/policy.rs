@@ -25,7 +25,7 @@
 use std::time::Duration;
 
 use chrono::Utc;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 
 use crate::cache_store::{self, CachePolicy, Metadata};
 use crate::hook::ignore_filter;
@@ -87,6 +87,31 @@ const FORWARD_HEADER_BLACKLIST: &[&str] = &[
     "content-encoding",
 ];
 
+/// Headers that pass `forward_response_headers` (so they reach the webview on
+/// the MISS response) but are deliberately **not** persisted in the sidecar
+/// for HIT replay.
+///
+/// - `Set-Cookie`: replaying a stale `Set-Cookie` from disk would overwrite a
+///   live session cookie the webview / reqwest jar may have rotated since.
+///   Cookie correctness on cache HIT is "use whatever the webview already
+///   has"; we never re-emit the captured value.
+const SIDECAR_HEADER_BLACKLIST: &[&str] = &["set-cookie"];
+
+/// Filter `extras` (the post-`forward_response_headers` list) for sidecar
+/// persistence. Returns the headers that are safe to replay on cache HIT.
+/// Matching is case-insensitive (HTTP header names are case-insensitive per
+/// RFC 7230 §3.2).
+fn headers_for_sidecar(extras: &[(String, String)]) -> Vec<(String, String)> {
+    extras
+        .iter()
+        .filter(|(name, _)| {
+            let lower = name.to_ascii_lowercase();
+            !SIDECAR_HEADER_BLACKLIST.contains(&lower.as_str())
+        })
+        .cloned()
+        .collect()
+}
+
 /// Extract the headers we want to forward from a reqwest response. The
 /// upstream `Content-Type` is returned separately (for the platform layer to
 /// stamp into its first-class response slot); everything else minus the
@@ -119,6 +144,35 @@ fn forward_response_headers(
         };
         out.push((name.as_str().to_string(), value_str.to_string()));
     }
+
+    // [CORS-DEBUG] Show what survived the blacklist. If
+    // Access-Control-Allow-Origin was present in the upstream response but
+    // is missing from this list, the blacklist is the culprit (H2). If it
+    // was already absent upstream (see http_fetcher's
+    // upstream_response_headers log), this is a no-op for diagnosis.
+    //
+    // Grep:
+    //   forwarded_headers count=
+    //   forwarded_acao=
+    let forwarded_acao = out
+        .iter()
+        .find(|(n, _)| n.eq_ignore_ascii_case("access-control-allow-origin"))
+        .map(|(_, v)| v.as_str())
+        .unwrap_or("<absent>");
+    trace!(
+        target: "hook",
+        "forwarded_headers count={} content_type={:?} forwarded_acao={}",
+        out.len(),
+        content_type,
+        forwarded_acao
+    );
+    for (name, value) in &out {
+        trace!(
+            target: "hook",
+            "  forwarded_header {}={}",
+            name, value
+        );
+    }
     (content_type, out)
 }
 
@@ -150,14 +204,37 @@ pub async fn evaluate(url: &str, request_headers: &http::HeaderMap) -> Decision 
     // 3. Cache lookup.
     if let Some((body, meta)) = cache_store::read(&cache_key).await {
         info!(target: "hook", "HIT key={} bytes={}", cache_key, body.len());
+        // [CORS-DEBUG] On HIT we now replay the upstream `forwarded_headers`
+        // that were captured into the sidecar at MISS write time (CORS,
+        // Cache-Control, X-Frame-Options, CSP, Vary, etc.). `Set-Cookie`
+        // and the hop-by-hop blacklist were stripped before persistence
+        // (see `headers_for_sidecar` + `FORWARD_HEADER_BLACKLIST`).
+        //
+        // The probe below logs whether ACAO is being replayed for this
+        // particular HIT — if `acao_probe=<absent>`, the cached sidecar was
+        // either written before this fix landed (clear overrides/ to
+        // refresh) or the upstream genuinely never sent ACAO.
+        //
+        // Grep: HIT_replay_headers acao_probe=
+        let acao_probe = meta
+            .forwarded_headers
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case("access-control-allow-origin"))
+            .map(|(_, v)| v.as_str())
+            .unwrap_or("<absent>");
+        trace!(
+            target: "hook",
+            "HIT_replay_headers url={} key={} content_type={:?} replay_count={} acao_probe={}",
+            url,
+            cache_key,
+            meta.content_type,
+            meta.forwarded_headers.len(),
+            acao_probe
+        );
         return Decision::Respond {
             body,
             content_type: meta.content_type,
-            // Cached entries don't preserve the original response headers
-            // beyond `content_type`/`etag`/`last_modified` (sidecar schema)
-            // so we have nothing else to forward on a HIT. Set-Cookie /
-            // Cache-Control reflowing only happens on MISS / ignore.
-            extra_headers: Vec::new(),
+            extra_headers: meta.forwarded_headers,
         };
     }
 
@@ -232,12 +309,20 @@ async fn fetch_and_cache(
     // skipped write still serves the freshly-fetched body to the webview —
     // we just don't persist it. Persistence failures (after we decided to
     // store) are logged but not fatal.
+    //
+    // `extra_headers` is what we forwarded to the webview on this MISS;
+    // `headers_for_sidecar` strips entries we never want to replay on a
+    // future HIT (currently just `Set-Cookie`). The remaining list goes
+    // into the sidecar so HIT responses carry the same CORS / CSP / Vary /
+    // Cache-Control surface as the original MISS.
+    let forwarded_for_sidecar = headers_for_sidecar(&extra_headers);
     let meta = Metadata {
         original_url: url.to_string(),
         content_type: content_type.clone(),
         etag,
         last_modified,
         saved_at: Utc::now().to_rfc3339(),
+        forwarded_headers: forwarded_for_sidecar,
     };
     match cache_policy {
         CachePolicy::Skip { reason } => {
@@ -365,5 +450,51 @@ mod tests {
         let (ct, extras) = forward_response_headers(&h);
         assert!(ct.is_none());
         assert!(extras.is_empty());
+    }
+
+    /// `headers_for_sidecar` strips `Set-Cookie` (case-insensitive) so HIT
+    /// replay never re-emits a stale session cookie, while keeping every
+    /// other forwarded header (CORS, Cache-Control, Vary, ETag, X-Custom).
+    /// Multi-value Set-Cookie entries are all dropped.
+    #[test]
+    fn headers_for_sidecar_strips_set_cookie_case_insensitive() {
+        let extras = vec![
+            (
+                "Access-Control-Allow-Origin".to_string(),
+                "https://app.example.com".to_string(),
+            ),
+            ("Set-Cookie".to_string(), "a=1; Path=/".to_string()),
+            ("set-cookie".to_string(), "b=2; Secure".to_string()),
+            ("SET-COOKIE".to_string(), "c=3".to_string()),
+            ("Cache-Control".to_string(), "max-age=300".to_string()),
+            ("Vary".to_string(), "Accept-Encoding".to_string()),
+            ("ETag".to_string(), "\"abc\"".to_string()),
+            ("X-Custom".to_string(), "keep-me".to_string()),
+        ];
+
+        let kept = headers_for_sidecar(&extras);
+        let lc_names: Vec<String> = kept.iter().map(|(n, _)| n.to_ascii_lowercase()).collect();
+
+        // No Set-Cookie variants survive.
+        assert!(
+            !lc_names.iter().any(|n| n == "set-cookie"),
+            "set-cookie must be stripped (case-insensitive); got {:?}",
+            lc_names
+        );
+
+        // Everything else is preserved.
+        assert!(lc_names.iter().any(|n| n == "access-control-allow-origin"));
+        assert!(lc_names.iter().any(|n| n == "cache-control"));
+        assert!(lc_names.iter().any(|n| n == "vary"));
+        assert!(lc_names.iter().any(|n| n == "etag"));
+        assert!(lc_names.iter().any(|n| n == "x-custom"));
+
+        // Order of kept entries matches input order.
+        assert_eq!(kept.len(), 5);
+        assert_eq!(kept[0].0, "Access-Control-Allow-Origin");
+        assert_eq!(kept[1].0, "Cache-Control");
+        assert_eq!(kept[2].0, "Vary");
+        assert_eq!(kept[3].0, "ETag");
+        assert_eq!(kept[4].0, "X-Custom");
     }
 }
