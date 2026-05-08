@@ -217,11 +217,20 @@ Changes to the webview's `document.title` (including SPA route changes where the
 
 ### 4.1 `hook.config.json` (repository root)
 
-Default content ([`hook.config.json`](hook.config.json)):
+The shipped [`hook.config.json`](hook.config.json) sets `target_url` plus a starter `ignore_urls` list demonstrating all four entry shapes (see §4.3 for the full schema):
 
 ```json
 {
-  "target_url": "https://www.leelib.com"
+  "target_url": "https://www.leelib.com",
+  "ignore_urls": [
+    { "suffix": "gstatic.com",          "comment": "Google static asset CDN (apex + all subdomains)" },
+    { "suffix": "googletagmanager.com", "comment": "GTM / GA injection scripts" },
+    { "suffix": "google-analytics.com", "comment": "GA reporting endpoint" },
+    { "suffix": "cdn.jsdelivr.net",     "comment": "Public npm CDN" },
+    { "wildcard": "*.google.com",       "comment": "Example: matches google.com subdomains only (e.g. fonts.google.com / mail.google.com), apex excluded" },
+    { "url_wildcard": "https://ipecho.io/*", "comment": "Example: URL glob, * does not cross /" },
+    { "url_regex": "^https://example\\.com/track/.*", "comment": "Example: full-URL regex, caller controls anchors" }
+  ]
 }
 ```
 
