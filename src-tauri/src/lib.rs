@@ -36,6 +36,8 @@ use tauri::{
     menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder},
     Manager, WebviewUrl, WebviewWindowBuilder,
 };
+
+use crate::config::{WindowConfig, WindowMode};
 use tracing_subscriber::{fmt::time::ChronoLocal, EnvFilter};
 
 /// Menu item id for the "Open DevTools" entry. Matched in `on_menu_event` to
@@ -104,9 +106,7 @@ pub fn run() {
                 .map_err(|e| format!("invalid target_url {:?}: {}", cfg.target_url, e))?;
             let mut builder =
                 WebviewWindowBuilder::new(app, "main", WebviewUrl::External(target_url))
-                    .inner_size(1024.0, 768.0)
                     .resizable(true)
-                    .fullscreen(false)
                     // Enable the Web Inspector for both debug and release
                     // builds — pouch is a hook-debugging tool, not a
                     // shrink-wrapped end-user product. Pairs with the
@@ -128,6 +128,38 @@ pub fn run() {
                             );
                         }
                     });
+
+            // Apply the user-configured window-size mode. We always set
+            // `fullscreen` and `maximized` explicitly (defaulting to false) so
+            // mode switches in `hook.config.json` are deterministic across
+            // launches — never depending on a previous build's leftover state.
+            //
+            // Builder-time `.maximized(true)` is the cross-platform idiom for
+            // "fill the work area" (excludes macOS menubar/dock and Windows
+            // taskbar) — wry forwards it to NSWindow.zoom:/ShowWindow(SW_MAXIMIZE)
+            // which both honour the OS work area natively. See
+            // <https://docs.rs/tauri/2.9.5/tauri/webview/struct.WebviewWindowBuilder.html#method.maximized>.
+            builder = match cfg.window {
+                WindowConfig::Mode(WindowMode::Screen) => {
+                    builder.fullscreen(false).maximized(true)
+                }
+                WindowConfig::Mode(WindowMode::Fullscreen) => {
+                    builder.fullscreen(true).maximized(false)
+                }
+                WindowConfig::Size { width, height } if width > 0 && height > 0 => builder
+                    .fullscreen(false)
+                    .maximized(false)
+                    .inner_size(f64::from(width), f64::from(height)),
+                WindowConfig::Size { width, height } => {
+                    tracing::warn!(
+                        target: "hook",
+                        "[startup] window size {{ width: {}, height: {} }} has a zero dimension; falling back to default (screen)",
+                        width,
+                        height
+                    );
+                    builder.fullscreen(false).maximized(true)
+                }
+            };
 
             if let Some(js) = dispatcher.as_deref() {
                 builder = builder.initialization_script(js);

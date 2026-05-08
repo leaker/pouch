@@ -246,6 +246,7 @@ Fields:
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `target_url` | string (`http://` or `https://`) | No (falls through the priority chain when missing) | The real URL the main webview navigates to on launch (`WebviewUrl::External(target_url)`) |
+| `window` | `"screen"` \| `"fullscreen"` \| `{ "width": <px>, "height": <px> }` | No (default `"screen"`) | Initial window-size mode applied at launch. See §4.4. |
 | `ignore_urls` | array of entries (one of `suffix` / `wildcard` / `url_wildcard` / `url_regex`, plus optional `comment`) | No (missing/`null`/`[]` = no filtering) | Per-entry blacklist; matched URLs are fetched but never cached. See §4.3 for the four entry shapes. |
 
 ### 4.2 Priority chain
@@ -303,7 +304,39 @@ Host comparisons parse the URL via the `url` crate, so scheme / port / path / IP
 
 > **NSURLProtocol constraint behind "fetch but no write"**: see the module docs in [`policy.rs`](src-tauri/src/hook/policy.rs). Once macOS `-startLoading` has been called, the subclass **must** produce a response — there is no NSURLProtocol API to "let go mid-load and fall back to the default loader" — so even on an ignore-list hit we still fetch the body via reqwest and hand it back. The Windows path follows the same semantics so the policy layer can be shared.
 
-### 4.4 Logging
+### 4.4 `window` (size mode)
+
+Source: [`src-tauri/src/config.rs`](src-tauri/src/config.rs) (schema), [`src-tauri/src/lib.rs`](src-tauri/src/lib.rs) (apply)
+
+Controls the initial window dimensions. Three shapes are accepted:
+
+| Value | Behaviour |
+|---|---|
+| `"screen"` (**default**) | Fills the work area — excludes the macOS menubar / dock and the Windows taskbar. Implemented via Tauri's `WebviewWindowBuilder::maximized(true)`, which the underlying wry layer forwards to `NSWindow.zoom:` on macOS and `ShowWindow(SW_MAXIMIZE)` on Windows so the OS work area is honoured natively. |
+| `"fullscreen"` | Real fullscreen via `WebviewWindowBuilder::fullscreen(true)` — hides window chrome (title bar, traffic lights, taskbar). |
+| `{ "width": <px>, "height": <px> }` | Fixed logical-pixel inner size via `WebviewWindowBuilder::inner_size(width, height)`. Logical pixels are DPR-independent (a `1280` here is the same physical width on a Retina display as on a non-Retina one). |
+
+Examples:
+
+```json
+"window": "screen"
+```
+
+```json
+"window": "fullscreen"
+```
+
+```json
+"window": { "width": 1280, "height": 800 }
+```
+
+Validation:
+
+- Unknown string values (e.g. `"Screen"`, `"FULLSCREEN"`, `"max"`) fail JSON parsing for the whole config file (serde `rename_all = "lowercase"`); the loader then warns and falls through, so the resolved `window` defaults to `"screen"`.
+- Negative `width` / `height` fail at the `u32` deserialisation step (same fall-through behaviour).
+- Zero `width` or `height` is accepted by `u32` but logged as a `warn` at startup and falls back to `"screen"` mode.
+
+### 4.5 Logging
 
 The `TAURI_HOOK_LOG` environment variable uses [tracing-subscriber EnvFilter syntax](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html):
 

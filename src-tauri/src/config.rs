@@ -29,6 +29,10 @@ pub const DEFAULT_TARGET_URL: &str = "https://www.leelib.com";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub target_url: String,
+    /// Resolved window-size mode (never `Option` — defaults to
+    /// [`WindowConfig::default`] when missing from the JSON).
+    #[serde(default)]
+    pub window: WindowConfig,
 }
 
 /// On-disk schema for `hook.config.json`. Kept separate from `Config` so
@@ -36,11 +40,45 @@ pub struct Config {
 #[derive(Debug, Deserialize)]
 struct ConfigFile {
     target_url: Option<String>,
+    /// Optional window-size config. Missing → [`WindowConfig::default`].
+    #[serde(default)]
+    window: Option<WindowConfig>,
     /// Optional ignoreUrls list — see `hook/ignore_filter.rs` for the
     /// per-entry pattern syntax. Compiled into the global matcher set at
     /// startup; missing/null/empty all mean "no filtering".
     #[serde(default)]
     ignore_urls: Option<Vec<IgnoreEntry>>,
+}
+
+/// Initial window-size mode.
+///
+/// JSON shapes:
+/// - `"screen"`     → fill the work area (excludes macOS menubar/dock or
+///   Windows taskbar). Default when the field is omitted.
+/// - `"fullscreen"` → real fullscreen, hides window chrome.
+/// - `{ "width": 1280, "height": 800 }` → fixed logical pixel size.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy)]
+#[serde(untagged)]
+pub enum WindowConfig {
+    /// String mode: `"screen"` | `"fullscreen"`.
+    Mode(WindowMode),
+    /// Pixel size: `{ "width": <px>, "height": <px> }`. `u32` deserialisation
+    /// already rejects negatives; zero values fall back to default at apply
+    /// time (see `lib.rs`).
+    Size { width: u32, height: u32 },
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum WindowMode {
+    Screen,
+    Fullscreen,
+}
+
+impl Default for WindowConfig {
+    fn default() -> Self {
+        Self::Mode(WindowMode::Screen)
+    }
 }
 
 /// Load the runtime configuration following the resolution chain documented
@@ -53,16 +91,24 @@ struct ConfigFile {
 pub fn load() -> Config {
     // Always look at the JSON config first so its `ignore_urls` rules get
     // installed even when `target_url` is overridden via CLI / env.
-    let json_target_url = from_config_file();
+    // We also pull the optional `window` field out here so the same JSON read
+    // serves both target-url-fallback and window-config purposes.
+    let (json_target_url, window) = from_config_file();
 
     if let Some(url) = from_cli_args() {
         info!(target: "hook", "[config] target_url from CLI arg: {}", url);
-        return Config { target_url: url };
+        return Config {
+            target_url: url,
+            window,
+        };
     }
 
     if let Some(url) = from_env() {
         info!(target: "hook", "[config] target_url from TAURI_HOOK_TARGET_URL: {}", url);
-        return Config { target_url: url };
+        return Config {
+            target_url: url,
+            window,
+        };
     }
 
     if let Some((url, path)) = json_target_url {
@@ -72,7 +118,10 @@ pub fn load() -> Config {
             pretty_path(&path).display(),
             url
         );
-        return Config { target_url: url };
+        return Config {
+            target_url: url,
+            window,
+        };
     }
 
     warn!(
@@ -82,6 +131,7 @@ pub fn load() -> Config {
     );
     Config {
         target_url: DEFAULT_TARGET_URL.to_string(),
+        window,
     }
 }
 
@@ -112,11 +162,18 @@ fn from_env() -> Option<String> {
     }
 }
 
-/// Find and parse `hook.config.json`, returning the resolved URL plus the path
-/// we read it from (for logging). Side-effect: when a candidate parses, also
-/// installs any `ignore_urls` rules into the global matcher set (see
-/// `hook::ignore_filter::init_from_entries`).
-fn from_config_file() -> Option<(String, PathBuf)> {
+/// Find and parse `hook.config.json`, returning:
+/// - the resolved `target_url` plus the path we read it from (for logging), if
+///   any candidate yielded a valid http(s) URL,
+/// - the resolved `WindowConfig` (defaulted when missing or when no candidate
+///   parsed successfully).
+///
+/// Side-effect: when a candidate parses, also installs any `ignore_urls` rules
+/// into the global matcher set (see `hook::ignore_filter::init_from_entries`).
+fn from_config_file() -> (Option<(String, PathBuf)>, WindowConfig) {
+    let mut window = WindowConfig::default();
+    let mut target_url: Option<(String, PathBuf)> = None;
+
     for candidate in candidate_config_paths() {
         match std::fs::read_to_string(&candidate) {
             Ok(text) => match serde_json::from_str::<ConfigFile>(&text) {
@@ -137,8 +194,20 @@ fn from_config_file() -> Option<(String, PathBuf)> {
                         crate::hook::ignore_filter::init_from_entries(entries);
                     }
 
+                    // Window config follows the same "first-hit wins" pattern
+                    // as target_url — we only adopt it from the first candidate
+                    // that successfully parsed.
+                    if target_url.is_none() {
+                        if let Some(w) = parsed.window {
+                            window = w;
+                        }
+                    }
+
                     match parsed.target_url {
-                        Some(url) if looks_like_url(&url) => return Some((url, candidate)),
+                        Some(url) if looks_like_url(&url) => {
+                            target_url = Some((url, candidate));
+                            return (target_url, window);
+                        }
                         Some(url) => warn!(
                             target: "hook",
                             "[config] {} target_url is not an http(s) URL: {:?}",
@@ -170,7 +239,7 @@ fn from_config_file() -> Option<(String, PathBuf)> {
             ),
         }
     }
-    None
+    (target_url, window)
 }
 
 /// All locations we will try, in priority order.
@@ -220,5 +289,52 @@ mod tests {
     fn config_file_tolerates_missing_field() {
         let parsed: ConfigFile = serde_json::from_str("{}").unwrap();
         assert!(parsed.target_url.is_none());
+    }
+
+    #[test]
+    fn window_config_screen_string() {
+        let parsed: WindowConfig = serde_json::from_str(r#""screen""#).unwrap();
+        assert!(matches!(parsed, WindowConfig::Mode(WindowMode::Screen)));
+    }
+
+    #[test]
+    fn window_config_fullscreen_string() {
+        let parsed: WindowConfig = serde_json::from_str(r#""fullscreen""#).unwrap();
+        assert!(matches!(parsed, WindowConfig::Mode(WindowMode::Fullscreen)));
+    }
+
+    #[test]
+    fn window_config_size_object() {
+        let parsed: WindowConfig =
+            serde_json::from_str(r#"{"width": 1280, "height": 800}"#).unwrap();
+        match parsed {
+            WindowConfig::Size { width, height } => {
+                assert_eq!(width, 1280);
+                assert_eq!(height, 800);
+            }
+            _ => panic!("expected Size variant"),
+        }
+    }
+
+    #[test]
+    fn window_config_rejects_uppercase_mode() {
+        // serde rename_all = "lowercase" + untagged enum: "Screen" matches no
+        // variant, so the whole untagged enum fails to deserialise.
+        assert!(serde_json::from_str::<WindowConfig>(r#""Screen""#).is_err());
+        assert!(serde_json::from_str::<WindowConfig>(r#""FULLSCREEN""#).is_err());
+        assert!(serde_json::from_str::<WindowConfig>(r#""max""#).is_err());
+    }
+
+    #[test]
+    fn config_file_window_defaults_when_missing() {
+        let parsed: ConfigFile = serde_json::from_str("{}").unwrap();
+        assert!(parsed.window.is_none());
+        // The resolved Config (via the load() path) defaults to Screen — we
+        // can't easily call load() here because it touches argv/env/fs, but we
+        // can confirm the WindowConfig::default() contract directly.
+        assert!(matches!(
+            WindowConfig::default(),
+            WindowConfig::Mode(WindowMode::Screen)
+        ));
     }
 }
