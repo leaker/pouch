@@ -79,9 +79,10 @@ struct ConfigFile {
 /// - `"inherit"`    → restore position / size / mode from the previous
 ///   session (persisted in `storage.db` — see [`crate::storage`]); falls
 ///   back to the same default 1280x960 geometry as `"default"` on first
-///   launch.
+///   launch. Default when the field is omitted (VSCode-style UX —
+///   first-launch fallback to default 1280x960).
 /// - `"maximized"`  → fill the work area (excludes macOS menubar/dock or
-///   Windows taskbar). Default when the field is omitted.
+///   Windows taskbar).
 /// - `"fullscreen"` → real fullscreen, hides window chrome.
 /// - `{ "width": 1280, "height": 800 }` → fixed logical pixel size.
 #[derive(Debug, Deserialize, Serialize, Clone, Copy)]
@@ -112,7 +113,7 @@ pub enum WindowDimensionsMode {
 
 impl Default for WindowDimensions {
     fn default() -> Self {
-        Self::Mode(WindowDimensionsMode::Maximized)
+        Self::Mode(WindowDimensionsMode::Inherit)
     }
 }
 
@@ -351,13 +352,13 @@ mod tests {
     fn config_file_window_dimensions_defaults_when_missing() {
         let parsed: ConfigFile = serde_json::from_str("{}").unwrap();
         assert!(parsed.window_dimensions.is_none());
-        // The resolved Config (via the load() path) defaults to Maximized —
+        // The resolved Config (via the load() path) defaults to Inherit —
         // we can't easily call load() here because it touches argv/env/fs,
         // but we can confirm the WindowDimensions::default() contract
         // directly.
         assert!(matches!(
             WindowDimensions::default(),
-            WindowDimensions::Mode(WindowDimensionsMode::Maximized)
+            WindowDimensions::Mode(WindowDimensionsMode::Inherit)
         ));
     }
 }

@@ -278,7 +278,7 @@ The shipped [`hook.config.json`](hook.config.json) sets `startup_urls` plus a st
   "startup_urls": [
     "https://www.leelib.com"
   ],
-  "window_dimensions": "maximized",
+  "window_dimensions": "inherit",
   "ignore_urls": [
     { "suffix": "gstatic.com",          "comment": "Google static asset CDN (apex + all subdomains)" },
     { "suffix": "googletagmanager.com", "comment": "GTM / GA injection scripts" },
@@ -296,7 +296,7 @@ Fields:
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `startup_urls` | array of strings (each `http://` or `https://`) | No (missing/`null`/`[]` = prompt the user via NSAlert at startup; Cancel exits — see §2.6 / §4.2) | URLs to open at launch. The first valid entry becomes the main `WebviewWindow` (`label = "main"`, `WebviewUrl::External(url)`); every subsequent entry opens as its own extra window with shared cookies / cache and an independent webview lifecycle. Non-http(s) entries are dropped with a `warn` log. See §2.6. |
-| `window_dimensions` | `"default"` \| `"inherit"` \| `"maximized"` \| `"fullscreen"` \| `{ "width": <px>, "height": <px> }` | No (default `"maximized"`) | Initial window dimensions applied at launch (uniformly to the main window and every extra window). VSCode-style naming. `"inherit"` restores from `storage.db` — see §5.5. See §4.4. |
+| `window_dimensions` | `"default"` \| `"inherit"` \| `"maximized"` \| `"fullscreen"` \| `{ "width": <px>, "height": <px> }` | No (default `"inherit"`; first-launch fallback to default 1280×960) | Initial window dimensions applied at launch (uniformly to the main window and every extra window). VSCode-style naming. `"inherit"` restores from `storage.db` — see §5.5. See §4.4. |
 | `ignore_urls` | array of entries (one of `suffix` / `wildcard` / `url_wildcard` / `url_regex`, plus optional `comment`) | No (missing/`null`/`[]` = no filtering) | Per-entry blacklist; matched URLs are fetched but never cached. See §4.3 for the four entry shapes. |
 
 > **Schema break in v1.1**: the previous fields `target_url` (single string) and `windows` (array) have been **unified into the single `startup_urls` array**. There is no deprecation alias — users upgrading from v1.0.x must edit `hook.config.json` by hand. The `TAURI_HOOK_TARGET_URL` environment variable and the `argv[1]` URL override have also been removed in the same change (everything goes through `startup_urls` now).
@@ -361,8 +361,8 @@ Controls the initial window dimensions. VSCode-style naming for clarity — the 
 | Value | Behaviour |
 |---|---|
 | `"default"` | Ordinary floating window at the `DEFAULT_WINDOW_{WIDTH,HEIGHT}` (1280x960) baseline; not maximised, not fullscreen. Useful when the user wants to position / resize the window manually. |
-| `"inherit"` | Restore the window's position, size, and mode (maximised / fullscreen) from the previous session. State is persisted in `storage.db` (see §5.5) — every Resize / Move gesture writes the new geometry after a 1-second debounce. Falls back to `"default"`'s 1280x960 geometry on first launch (when no state has been recorded yet). |
-| `"maximized"` (**default**) | Fills the work area — excludes the macOS menubar / dock and the Windows taskbar. Implemented via Tauri's `WebviewWindowBuilder::maximized(true)`, which the underlying wry layer forwards to `NSWindow.zoom:` on macOS and `ShowWindow(SW_MAXIMIZE)` on Windows so the OS work area is honoured natively. |
+| `"inherit"` (**default**) | Restore the window's position, size, and mode (maximised / fullscreen) from the previous session. State is persisted in `storage.db` (see §5.5) — every Resize / Move gesture writes the new geometry after a 1-second debounce. Falls back to `"default"`'s 1280x960 geometry on first launch (when no state has been recorded yet — i.e. first-launch fallback to default 1280×960). |
+| `"maximized"` | Fills the work area — excludes the macOS menubar / dock and the Windows taskbar. Implemented via Tauri's `WebviewWindowBuilder::maximized(true)`, which the underlying wry layer forwards to `NSWindow.zoom:` on macOS and `ShowWindow(SW_MAXIMIZE)` on Windows so the OS work area is honoured natively. |
 | `"fullscreen"` | Real fullscreen via `WebviewWindowBuilder::fullscreen(true)` — hides window chrome (title bar, traffic lights, taskbar). |
 | `{ "width": <px>, "height": <px> }` | Fixed logical-pixel inner size via `WebviewWindowBuilder::inner_size(width, height)`. Logical pixels are DPR-independent (a `1280` here is the same physical width on a Retina display as on a non-Retina one). |
 
@@ -390,7 +390,7 @@ Examples:
 
 Validation:
 
-- Unknown string values (e.g. `"Maximized"`, `"FULLSCREEN"`, `"max"`, the legacy v1.0.x value `"screen"`) fail JSON parsing for the whole config file (serde `rename_all = "lowercase"`); the loader then warns and falls through, so the resolved `window_dimensions` defaults to `"maximized"`.
+- Unknown string values (e.g. `"Maximized"`, `"FULLSCREEN"`, `"max"`, the legacy v1.0.x value `"screen"`) fail JSON parsing for the whole config file (serde `rename_all = "lowercase"`); the loader then warns and falls through, so the resolved `window_dimensions` defaults to `"inherit"` (first-launch fallback to default 1280×960).
 - Negative `width` / `height` fail at the `u32` deserialisation step (same fall-through behaviour).
 - Zero `width` or `height` is accepted by `u32` but logged as a `warn` at startup and falls back to `"maximized"` mode.
 
