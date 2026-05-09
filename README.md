@@ -708,13 +708,11 @@ pouch/
 │               ├── mod.rs          # cfg dispatch; install_global / install_for_webview
 │               ├── macos.rs        # NSURLProtocol + private selector (install_global)
 │               └── windows.rs      # WebView2 + add_WebResourceRequested (install_for_webview)
-├── overrides/             # cache root (created at runtime)
-│   └── .gitkeep
-└── tasks/                 # local notes + decisions (gitignored, kept locally)
-    ├── todo.md
-    ├── lessons.md
-    └── decisions/
+└── overrides/             # cache root (created at runtime)
+    └── .gitkeep
 ```
+
+> Local-only directories (gitignored, never tracked): `tasks/` (planning notes + decisions), `tests/` (scratch test dir), `node_modules/`, `target/`, `dist/`, plus `storage.db*` runtime state files. See [`.gitignore`](.gitignore) for the full list.
 
 > Architectural note: there is no `frontend/` directory and no `commands.rs` — Pouch deliberately has zero frontend runtime and zero IPC surface. `tauri.conf.json` does not declare `build`, `app.security`, or `app.withGlobalTauri`; the main window is built programmatically in `lib.rs` with `WebviewWindowBuilder::new(app, "main", WebviewUrl::External(startup_urls[0]))`.
 
