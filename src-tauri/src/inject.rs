@@ -25,7 +25,7 @@
 //! a `Function` constructor. This is deliberate — these files are part of
 //! Pouch's user-supplied configuration surface and are explicitly trusted.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use tracing::{info, warn};
 
@@ -57,29 +57,60 @@ pub enum MatchPattern {
     Regex(String),
 }
 
-/// Scan the resolved `inject/` directory and return all parsed rules.
+/// Recursively collect every `.js` file beneath `dir` into `out`.
 ///
-/// Rules are returned sorted by file name to give deterministic dispatch
-/// order across runs and platforms (`read_dir` order is unspecified). An
-/// empty result is the happy path for "no inject directory" / "no .js files"
-/// / "no files survived parsing".
+/// Subdirectories are descended into so users can organise scripts by project
+/// (e.g. `inject/project1/foo.js`, `inject/utils/shared.js`). Symlinks are
+/// **not** followed: `entry.file_type()` reports the link itself rather than
+/// its target on every platform Tauri runs on, which is exactly what we want
+/// — a misconfigured symlink loop would otherwise hang startup forever.
+///
+/// I/O errors propagate so the caller can warn once and bail rather than
+/// silently producing a half-scanned rule set.
+fn collect_js_files(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            collect_js_files(&path, out)?;
+        } else if file_type.is_file()
+            && path.extension().and_then(|s| s.to_str()) == Some("js")
+        {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
+/// Scan the resolved `inject/` directory (recursively) and return all parsed
+/// rules.
+///
+/// Rules are returned sorted by full path to give deterministic dispatch
+/// order across runs and platforms (`read_dir` order is unspecified, and
+/// recursion produces an even less predictable interleaving). An empty
+/// result is the happy path for "no inject directory" / "no .js files" /
+/// "no files survived parsing".
 pub fn scan_inject_dir() -> Vec<InjectRule> {
     let Some(dir) = resolve_inject_dir() else {
         return Vec::new();
     };
     info!(target: "hook", "[inject] scanning {}", pretty_path(&dir).display());
 
-    let mut entries: Vec<PathBuf> = match std::fs::read_dir(&dir) {
-        Ok(rd) => rd
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| p.is_file() && p.extension().map(|x| x == "js").unwrap_or(false))
-            .collect(),
-        Err(e) => {
-            warn!(target: "hook", "[inject] read_dir({}) failed: {}", pretty_path(&dir).display(), e);
-            return Vec::new();
-        }
-    };
+    let mut entries: Vec<PathBuf> = Vec::new();
+    if let Err(e) = collect_js_files(&dir, &mut entries) {
+        warn!(
+            target: "hook",
+            "[inject] scan failed under {}: {}",
+            pretty_path(&dir).display(),
+            e
+        );
+        return Vec::new();
+    }
+    // Lexicographic by full path: stable across platforms and across runs,
+    // and groups files under the same subdirectory together in dispatch
+    // order — which is the natural expectation when users organise scripts
+    // by project folder.
     entries.sort();
 
     let mut rules = Vec::new();
@@ -411,6 +442,40 @@ console.log('body');
                 rule.name
             );
         }
+    }
+
+    #[test]
+    fn collect_js_files_walks_recursively() {
+        // Mixed layout: top-level file, one nested level, two nested levels,
+        // plus a non-`.js` distractor file at depth=2 to confirm the
+        // extension filter survives recursion.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        std::fs::write(root.join("top.js"), b"// top\n").unwrap();
+        std::fs::create_dir_all(root.join("project1")).unwrap();
+        std::fs::write(root.join("project1/foo.js"), b"// foo\n").unwrap();
+        std::fs::create_dir_all(root.join("project2/sub")).unwrap();
+        std::fs::write(root.join("project2/sub/bar.js"), b"// bar\n").unwrap();
+        // Distractors that must NOT show up.
+        std::fs::write(root.join("project2/sub/note.txt"), b"ignored\n").unwrap();
+        std::fs::write(root.join("project2/README.md"), b"ignored\n").unwrap();
+
+        let mut out: Vec<PathBuf> = Vec::new();
+        collect_js_files(root, &mut out).expect("walk should succeed");
+        out.sort();
+
+        assert_eq!(out.len(), 3, "expected 3 .js files, got {:?}", out);
+        assert!(out[0].ends_with("project1/foo.js"));
+        assert!(out[1].ends_with("project2/sub/bar.js"));
+        assert!(out[2].ends_with("top.js"));
+    }
+
+    #[test]
+    fn collect_js_files_handles_empty_dir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut out: Vec<PathBuf> = Vec::new();
+        collect_js_files(dir.path(), &mut out).expect("walk should succeed");
+        assert!(out.is_empty());
     }
 
     #[test]

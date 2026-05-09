@@ -550,6 +550,8 @@ Source: [`src-tauri/src/inject.rs`](src-tauri/src/inject.rs)
 
 Pouch supports a Tampermonkey-style "inject on URL match" mechanism: drop any `*.js` file into the `inject/` directory (resolved the same way as `hook.config.json` — see §2.2: repo root in dev, `~/Library/Application Support/Pouch/inject/` on macOS release, next to `pouch.exe` on Windows release) and at startup the file's frontmatter is parsed and assembled into a dispatcher that is injected into the main webview as `initialization_script`. On every top-level navigation the dispatcher decides which rules to trigger based on `location.href`, and each matching rule executes inside its own function scope.
 
+`inject/` is scanned **recursively**: any `.js` file at any depth is loaded, so you can group scripts by project (`inject/project1/foo.js`, `inject/utils/shared.js`, …) without flattening them into the top level. Symlinks are not followed. Files load in lexicographic order of their full path, so dispatch order is deterministic across platforms and across runs.
+
 Pouch ships two demos ([`inject/global.js`](inject/global.js), [`inject/leelib.js`](inject/leelib.js)) showing two typical patterns — "console output on every URL" and "banner injection on a specific site" — that you can edit or remove freely.
 
 ### 6.1 Frontmatter syntax
