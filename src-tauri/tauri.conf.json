@@ -19,7 +19,8 @@
     ],
     "resources": {
       "../hook.config.json": "sample/hook.config.json",
-      "../inject/": "sample/inject/"
+      "../inject/global.js": "sample/inject/global.js",
+      "../inject/www.leelib.com/leelib.js": "sample/inject/www.leelib.com/leelib.js"
     },
     "android": {
       "debugApplicationIdSuffix": ".debug"

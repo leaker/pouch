@@ -57,7 +57,7 @@ Edit `hook.config.json` — its location depends on whether you are running a de
 
 `startup_urls` is an array — the first entry becomes the main window and any additional entries open as extra windows on launch (see §2.6). Setting a single-element array is the **default and recommended** way to configure Pouch. If `startup_urls` is missing, `null`, `[]`, or every entry was non-http(s), Pouch prompts the user with a native NSAlert at startup so the launch can still proceed; **Cancel exits the process** (Escape is equivalent). See §4.1 for the full schema.
 
-> **macOS first launch**: when you double-click `Pouch.app` for the first time, the directory `~/Library/Application Support/Pouch/` does not yet exist. Pouch detects this and seeds it with a copy of the sample `hook.config.json` and `inject/*.js` shipped inside the .app bundle (`Contents/Resources/sample/`). Edit those files freely afterwards — Pouch only seeds the directory on first launch and never overwrites your edits. To reset, delete the directory and relaunch.
+> **macOS first launch**: when you double-click `Pouch.app` for the first time, the directory `~/Library/Application Support/Pouch/` does not yet exist. Pouch detects this and seeds it with a copy of the sample `hook.config.json` and the explicit sample `inject/*.js` files shipped inside the .app bundle (`Contents/Resources/sample/`). The bundled sample list is enumerated explicitly in `src-tauri/tauri.conf.json` `bundle.resources` rather than mapped from the whole `inject/` directory, so any debug / scratch `.js` files you keep in the dev-tree `inject/` will **not** sneak into the .app — adding a new sample requires updating that map. Edit the seeded files freely afterwards — Pouch only seeds the directory on first launch and never overwrites your edits. To reset, delete the directory and relaunch.
 
 ### 2.3 Install and launch
 
@@ -552,7 +552,7 @@ Pouch supports a Tampermonkey-style "inject on URL match" mechanism: drop any `*
 
 `inject/` is scanned **recursively**: any `.js` file at any depth is loaded, so you can group scripts by project (`inject/project1/foo.js`, `inject/utils/shared.js`, …) without flattening them into the top level. Symlinks are not followed. Files load in lexicographic order of their full path, so dispatch order is deterministic across platforms and across runs.
 
-Pouch ships two demos ([`inject/global.js`](inject/global.js), [`inject/leelib.js`](inject/leelib.js)) showing two typical patterns — "console output on every URL" and "banner injection on a specific site" — that you can edit or remove freely.
+Pouch ships two demos ([`inject/global.js`](inject/global.js), [`inject/www.leelib.com/leelib.js`](inject/www.leelib.com/leelib.js)) showing two typical patterns — "console output on every URL" and "banner injection on a specific site" — that you can edit or remove freely.
 
 ### 6.1 Frontmatter syntax
 
@@ -680,8 +680,8 @@ pouch/
 ├── package.json           # only one devDep: @tauri-apps/cli
 ├── bun.lock
 ├── inject/                # user-script directory (see §6)
-│   ├── global.js          # demo: @match * console output on every URL
-│   └── leelib.js          # demo: @match https://www.leelib.com/* banner
+│   ├── global.js                    # demo: @match * console output on every URL
+│   └── www.leelib.com/leelib.js     # demo: @match https://www.leelib.com/* banner
 ├── src-tauri/
 │   ├── Cargo.toml         # cfg-gated platform deps (webview2-com / objc2-*)
 │   ├── tauri.conf.json    # minimal: app.windows = [] (window built in Rust)
