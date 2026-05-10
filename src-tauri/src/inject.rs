@@ -284,7 +284,7 @@ fn parse_frontmatter(content: &str) -> Option<(Option<String>, Vec<MatchPattern>
 /// [`crate::util::user_data_dir`]):
 /// - dev: `<CARGO_MANIFEST_DIR>/../inject`.
 /// - macOS prod: `~/Library/Application Support/Pouch/inject`.
-/// - Windows / Linux prod: `<exe parent>/inject`.
+/// - Windows prod: `<exe parent>/inject`.
 ///
 /// We additionally try `./inject` relative to cwd as a last-ditch fallback
 /// (mirrors `config.rs`). Returns `None` when nothing exists; the caller

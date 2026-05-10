@@ -14,9 +14,13 @@
 //!
 //! `install_global` runs before webview creation (real on macOS, no-op on
 //! Windows). `install_for_webview` runs after webview creation (real on
-//! Windows, no-op on macOS). Unsupported targets fall through to a `warn` log
-//! so Pouch still builds for development convenience; real interception only
-//! works on macOS and Windows.
+//! Windows, no-op on macOS). Pouch only ships for macOS and Windows — any
+//! other target fails to compile via [`compile_error!`] below.
+
+// Pouch only supports macOS and Windows. Fail loudly at compile time on any
+// other target rather than silently skipping native interception.
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+compile_error!("pouch only supports macOS and Windows");
 
 #[cfg(target_os = "macos")]
 pub mod macos;
@@ -53,14 +57,6 @@ pub fn install_global() -> Result<(), InstallError> {
         );
         Ok(())
     }
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    {
-        tracing::warn!(
-            target: "hook",
-            "[hook] platform not supported (only macOS + Windows); native interception disabled"
-        );
-        Ok(())
-    }
 }
 
 /// Post-webview platform setup. Runs once from the Tauri `setup` callback
@@ -82,11 +78,6 @@ pub fn install_for_webview<R: tauri::Runtime>(
             target: "hook",
             "[hook][mac] install_for_webview no-op (NSURLProtocol registered globally in install_global)"
         );
-        Ok(())
-    }
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    {
-        let _ = app;
         Ok(())
     }
 }

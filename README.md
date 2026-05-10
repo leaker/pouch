@@ -22,12 +22,12 @@ How Pouch compares to a CDP-based interception approach (e.g. an Electron app dr
 | Stack | Electron + Node.js + Chromium | Rust + Tauri v2 + system WebView |
 | Interception layer | Chrome DevTools Protocol (CDP) `Fetch.requestPaused` | Platform-native network stack: macOS `NSURLProtocol` / Windows `WebView2 WebResourceRequested` |
 | Cookie / Origin / CSP | Automatically correct (CDP intercepts inside the engine) | Automatically correct (native network stack intercepts inside the engine) |
-| Platform support | mac / Windows / Linux | mac + Windows (**Linux not supported**, see §7) |
+| Platform support | mac + Windows | mac + Windows |
 | `Content-Type` recovery | Often guessed from filename on subsequent reads | Sidecar `.meta.json` persists the original response headers |
 | Write-to-disk atomicity | Direct `fs.writeFile` | `tempfile::NamedTempFile + persist` (POSIX `rename(2)`) |
 | Binary size | ~100 MB+ (bundles Chromium) | ~10 MB (uses the system WebView; **not yet measured, TODO**) |
 
-In short: Pouch delivers equivalent capability with a smaller binary plus the system WebView, structures the cache metadata, and makes disk writes atomic. The trade-offs are: **no Linux support**, and **macOS depends on a private WebKit selector** (same risk profile as Electron — see §9).
+In short: Pouch delivers equivalent capability with a smaller binary plus the system WebView, structures the cache metadata, and makes disk writes atomic. The trade-off: **macOS depends on a private WebKit selector** (same risk profile as Electron — see §9).
 
 ## 2. Quick start
 
@@ -37,7 +37,6 @@ In short: Pouch delivers equivalent capability with a smaller binary plus the sy
 - **Bun** (recommended) or Node.js + npm/pnpm: see [bun.sh](https://bun.sh)
 - **Tauri platform dependencies** (macOS needs Xcode CLT; Windows needs the WebView2 Runtime + MSVC toolchain): full list at [v2.tauri.app/start/prerequisites](https://v2.tauri.app/start/prerequisites/)
 - **macOS 11+** (Apple Silicon and Intel both work) or **Windows 10 1809+ / Windows 11**
-- **Linux is not supported** — see §7 and §8
 
 ### 2.2 Configure the target URL
 
@@ -124,7 +123,7 @@ Pouch runs as a single process and supports multiple `WebviewWindow`s sharing th
 
 Each window gets its own titlebar accessory (Reveal / Reload / Toggle DevTools). The DevTools button is per-window — clicking the button or pressing F12 toggles DevTools on the focused window only — while the Reveal Folder button is process-global and the Reload button still restarts the whole application (so all windows close and reopen with the freshly-read config).
 
-The Cmd+N New Window prompt is currently macOS-only because it is implemented against `NSAlert`; the rest of the multi-window plumbing is cross-platform and the startup `startup_urls` array works on Windows too. The startup-time NSAlert that pops up when `startup_urls` is empty is also macOS-only — on Windows / Linux an empty `startup_urls` resolves with a warn log instead, and Pouch will not open a window until you populate the field.
+The Cmd+N New Window prompt is currently macOS-only because it is implemented against `NSAlert`; the rest of the multi-window plumbing is cross-platform and the startup `startup_urls` array works on Windows too. The startup-time NSAlert that pops up when `startup_urls` is empty is also macOS-only — on Windows an empty `startup_urls` resolves with a warn log instead, and Pouch will not open a window until you populate the field.
 
 ### 2.7 Menu bar (macOS)
 
@@ -309,7 +308,7 @@ Source: [`src-tauri/src/config.rs`](src-tauri/src/config.rs)
 
 1. **`hook.config.json`** is read from: in dev mode, `<CARGO_MANIFEST_DIR>/../hook.config.json` (the repo root); in macOS release mode, `~/Library/Application Support/Pouch/hook.config.json` (seeded from `Pouch.app/Contents/Resources/sample/` on first launch); in Windows release mode, next to `pouch.exe`; `<cwd>/hook.config.json` is consulted as a last-ditch fallback in every mode. The first candidate that parses wins.
 2. Each entry is filtered to http(s); non-http(s) entries are dropped with a `warn` log.
-3. **Empty resolved list** (file missing, field omitted, `null`, `[]`, or every entry was non-http(s)) → on macOS, `dialog::prompt_initial_url` pops a native `NSAlert` titled "Welcome to Pouch" asking for a URL; OK opens that URL as the main window, Cancel / Escape calls `std::process::exit(0)`. On Windows / Linux there is no prompt UI, so an empty list is logged at WARN and Pouch refuses to open a window — populate the file and relaunch.
+3. **Empty resolved list** (file missing, field omitted, `null`, `[]`, or every entry was non-http(s)) → on macOS, `dialog::prompt_initial_url` pops a native `NSAlert` titled "Welcome to Pouch" asking for a URL; OK opens that URL as the main window, Cancel / Escape calls `std::process::exit(0)`. On Windows there is no prompt UI, so an empty list is logged at WARN and Pouch refuses to open a window — populate the file and relaunch.
 
 A successful parse prints an INFO log, e.g.:
 
@@ -507,7 +506,7 @@ Pouch **does not expose** IPC `clear_*` commands — there is no frontend trampo
 
 Source: [`src-tauri/src/storage.rs`](src-tauri/src/storage.rs)
 
-`storage.db` is a small SQLite database that lives **alongside** `hook.config.json` (same parent directory — i.e. `<repo>/storage.db` in dev, `~/Library/Application Support/Pouch/storage.db` on macOS release, `<exe parent>/storage.db` on Windows / Linux release). It is the single durable home for every cross-session state slot Pouch maintains — currently the most-recent window geometry (so `window_dimensions: "inherit"` can restore where the user left off) and the macOS Cmd+N recent-URLs history (so the dropdown survives relaunches). Future state slots drop into the same table without inventing another file.
+`storage.db` is a small SQLite database that lives **alongside** `hook.config.json` (same parent directory — i.e. `<repo>/storage.db` in dev, `~/Library/Application Support/Pouch/storage.db` on macOS release, `<exe parent>/storage.db` on Windows release). It is the single durable home for every cross-session state slot Pouch maintains — currently the most-recent window geometry (so `window_dimensions: "inherit"` can restore where the user left off) and the macOS Cmd+N recent-URLs history (so the dropdown survives relaunches). Future state slots drop into the same table without inventing another file.
 
 Single VSCode-style key/value table:
 
@@ -623,7 +622,6 @@ INFO hook: [startup] inject rules = 2 (dispatcher WILL be attached)
 | Windows 11 / 10 1809+ | Implementation complete (**not validated**) | `ICoreWebView2_22` public API; requires WebView2 Runtime ≥ 1.0.2210.55 |
 | Windows older Runtime | Fallback | Auto-falls back to `AddWebResourceRequestedFilter`; covers document/iframe only, **not** subresources / workers |
 | Window title | Auto-synced | Bridged via Tauri v2 `on_document_title_changed` to WKWebView title KVO on macOS and WebView2 `DocumentTitleChanged` on Windows; SPA route changes that update `document.title` also fire |
-| Linux | Not supported | WebKitGTK likewise requires private APIs to intercept request-level network traffic; this project does not invest in it. Use Electron if you need Linux |
 
 ### macOS App Store
 
@@ -638,7 +636,6 @@ INFO hook: [startup] inject rules = 2 (dispatcher WILL be attached)
 - **Top-level navigation also goes through the interceptor**: the main webview is started programmatically with `WebviewUrl::External(startup_urls[0])`, and the first frame's top-level document request is **also** covered by the native interception layer (macOS NSURLProtocol and Windows WebView2 WebResourceRequested both catch it), so `index.html` is cached on first launch
 - **JS injection does not re-run on SPA route changes**: `inject/*.js` runs once at document_start; pseudo-navigations performed by frontend frameworks via `history.pushState` will **not** re-trigger the rules. Hook the history API yourself if you need to react to route changes (see §6.2)
 - **`@match *` matches every URL**: including `about:blank` and `data:` subframes. Narrow it to at least `@match https://*` to match only http(s) origins
-- **macOS / Windows only**: Linux does not work (see §7)
 - **Cookie isolation**: cookies are split between two stores. The **webview** owns its own cookie jar (`NSHTTPCookieStorage` on macOS, the WebView2 cookie manager on Windows) and **reqwest** keeps its own in-process jar (enabled via `cookie_store(true)`). On a cache MISS / ignore-list passthrough, upstream `Set-Cookie` headers are forwarded verbatim to the webview (so it stores the cookie and replays it on subsequent requests) **and** stored in reqwest's jar (so further reqwest-driven fetches in the same session also carry it). The two jars are not bidirectionally synchronised, so cookies set by JS inside the webview are not visible to reqwest, and vice versa. `Set-Cookie` is **never** persisted in the cache sidecar — replay would leak a stale session cookie — so cache HITs serve the body without re-emitting cookies, leaving whatever the live cookie jars hold untouched
 - **Cache HIT replays upstream headers from the sidecar**: on a cache HIT, every header captured from the original upstream response (CORS `Access-Control-Allow-Origin` / `Access-Control-Allow-Credentials`, `Cache-Control`, `X-Frame-Options`, `Content-Security-Policy`, `Strict-Transport-Security`, `Vary`, etc.) is re-emitted to the webview alongside `content_type`, keeping CORS / framing / caching behaviour identical between the first MISS and subsequent HITs. `Set-Cookie` is the explicit exception (see "Cookie isolation" above). Sidecars written by older pouch builds — before this field existed — fall back to an empty replay list (`#[serde(default)]`); clear the affected `overrides/<host>/` subtree to refresh them
 - **Large files are buffered fully in memory**: `cache_store::read/write` loads each entry into a single `Vec<u8>`; resources > 100 MB may OOM (inherited from v1, left as future work to redo with streaming)
@@ -661,14 +658,14 @@ For context, here is how Pouch differs in detail from a CDP-driven interception 
 | Frontend transparency | Full (CDP intercepts inside the engine) | Full (native network stack intercepts; no frontend trampoline page either) |
 | User-script injection | Roll your own | Tampermonkey-style `inject/*.js`, URL-rule dispatcher injected at document_start (see §6) |
 | Window title sync | Engine default (built into Chromium) | Tauri v2 `on_document_title_changed` bridges WKWebView KVO / WebView2 `DocumentTitleChanged` |
-| Platform support | mac / win / linux | mac / win |
+| Platform support | mac / win | mac / win |
 | Private API dependency | None (CDP is a public Chromium protocol) | macOS only: `WKBrowsingContextController.registerSchemeForCustomProtocol:` |
 | Mac App Store | OK (Electron entitlements tacitly accepted) | Not OK (private selector is a hard reject) |
 | HTTP client | Node.js default (OpenSSL) | reqwest + rustls-TLS (no system OpenSSL dependency) |
 | Logging | `console.log` | `tracing` structured logs, controlled via `TAURI_HOOK_LOG` |
 | Binary size | ~100 MB+ (bundles Chromium) | ~10 MB (**not measured** — measure with `tauri build` in your fork and update this row) |
 
-**Key trade-off**: Pouch trades a private-API dependency on macOS (same risk as Electron) and the lack of Linux support for a much smaller binary, structured cache metadata, atomic writes, and a built-in URL-rule injection mechanism. If your goal is the Mac App Store or Linux, the Electron + CDP route remains the right pick.
+**Key trade-off**: Pouch trades a private-API dependency on macOS (same risk as Electron) for a much smaller binary, structured cache metadata, atomic writes, and a built-in URL-rule injection mechanism. If your goal is the Mac App Store, the Electron + CDP route remains the right pick.
 
 ## 10. Project layout
 

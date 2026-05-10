@@ -5,7 +5,7 @@
 //!
 //! - dev: `<repo>/storage.db`
 //! - macOS prod: `~/Library/Application Support/Pouch/storage.db`
-//! - Windows / Linux prod: `<exe parent>/storage.db`
+//! - Windows prod: `<exe parent>/storage.db`
 //!
 //! The path resolver piggy-backs on [`crate::util::user_data_path`] (with
 //! `UserDataKind::Config`) for its **parent directory** — the file we want is

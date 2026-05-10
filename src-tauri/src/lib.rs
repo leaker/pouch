@@ -74,7 +74,7 @@ pub(crate) const LOADING_TITLE: &str = "\u{23f3} Loading...";
 /// up a native `NSAlert` text-input prompt asking for a URL and, on OK,
 /// opens that URL as an additional `WebviewWindow` sharing cookies / cache
 /// with the main window. macOS-only because the prompt UI is hand-rolled
-/// against `NSAlert` + `NSTextField`; Windows / Linux would need a separate
+/// against `NSAlert` + `NSTextField`; Windows would need a separate
 /// implementation that we don't currently ship.
 #[cfg(target_os = "macos")]
 const MENU_ID_NEW_WINDOW: &str = "pouch.new_window";
@@ -90,8 +90,8 @@ const MENU_ID_REVEAL_FOLDER: &str = "pouch.reveal_folder";
 /// [`reload_from_config`], which restarts the application via
 /// [`AppHandle::restart`] so changes to `hook.config.json` and `inject/*.js`
 /// take effect on the fresh launch. macOS-only because the paired titlebar
-/// button is macOS-only; on Windows / Linux there's no analogous accessory
-/// and the keep-it-uniform argument from the reveal entry applies here too.
+/// button is macOS-only; on Windows there's no analogous accessory and the
+/// keep-it-uniform argument from the reveal entry applies here too.
 #[cfg(target_os = "macos")]
 const MENU_ID_RELOAD: &str = "pouch.reload";
 
@@ -312,7 +312,7 @@ pub fn run() {
             //    sample (hook.config.json + inject/) out of
             //    `Pouch.app/Contents/Resources/sample/` so the resolver
             //    chain in step 2 / `config::load` finds defaults to read.
-            //    No-op on dev / Windows / Linux.
+            //    No-op on dev / Windows.
             bootstrap::bootstrap_macos_user_dir(app.handle());
 
             // 1a. Load config (now that bootstrap, if applicable, has
@@ -746,7 +746,7 @@ const SAVE_DEBOUNCE: Duration = Duration::from_secs(1);
 /// Hook the per-window resize / move events so the geometry ends up
 /// persisted in `storage.db` for the next session's
 /// `window_dimensions: "inherit"` restore. Cross-platform — runs on every
-/// platform, not just macOS — so Windows / Linux users also benefit from
+/// supported platform, not just macOS — so Windows users also benefit from
 /// the inherit mode.
 ///
 /// Implementation note: every `WebviewWindow` already has a

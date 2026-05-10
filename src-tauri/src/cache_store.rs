@@ -231,7 +231,7 @@ static CACHE_ROOT: OnceLock<PathBuf> = OnceLock::new();
 /// Resolution chain (see [`crate::util::user_data_dir`]):
 /// - dev: `<CARGO_MANIFEST_DIR>/../overrides`.
 /// - macOS prod: `~/Library/Application Support/Pouch/overrides`.
-/// - Windows / Linux prod: `<exe parent>/overrides`.
+/// - Windows prod: `<exe parent>/overrides`.
 ///
 /// Honours the `CACHE_ROOT_OVERRIDE` env var (used by tests). The directory
 /// is created on first call, and its absolute path is logged once at INFO.

@@ -19,10 +19,10 @@
 //! sample bundle just looks like "ran with no config" — the same fallback
 //! behaviour we already use for power-loss / disk-full corner cases.
 //!
-//! This module is **macOS-only**. Windows/Linux release builds use a
-//! "portable" layout with `hook.config.json` + `inject/` next to the binary,
-//! and dev builds (`debug_assertions`) read straight from the repo root —
-//! neither needs bootstrapping.
+//! This module is **macOS-only**. Windows release builds use a "portable"
+//! layout with `hook.config.json` + `inject/` next to the binary, and dev
+//! builds (`debug_assertions`) read straight from the repo root — neither
+//! needs bootstrapping.
 
 #[cfg(all(target_os = "macos", not(debug_assertions)))]
 pub use macos::bootstrap_macos_user_dir;
@@ -32,7 +32,7 @@ pub use macos::bootstrap_macos_user_dir;
 /// matching cfg gate at the call site.
 #[cfg(not(all(target_os = "macos", not(debug_assertions))))]
 pub fn bootstrap_macos_user_dir(_app: &tauri::AppHandle) {
-    // Dev / Windows / Linux: nothing to do.
+    // Dev / Windows: nothing to do.
 }
 
 #[cfg(all(target_os = "macos", not(debug_assertions)))]

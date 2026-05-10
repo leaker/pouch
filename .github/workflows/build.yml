@@ -58,8 +58,8 @@
 # remains the right tool for macOS where signing + notarization is
 # non-trivial to reimplement by hand.
 #
-# Linux, x86_64-mac, universal-apple-darwin, iOS and Android are
-# intentionally out of scope for Pouch.
+# x86_64-mac (standalone), iOS and Android are intentionally out of scope
+# for Pouch (see README §7 for the supported platform matrix).
 #
 # macOS code signing + notarization
 # ---------------------------------
@@ -78,7 +78,6 @@
 #       Base64-encoded .p12 file containing your "Developer ID Application"
 #       certificate AND its private key. Export from Keychain Access ->
 #       My Certificates, then:  base64 -i cert.p12 | pbcopy   (macOS)
-#                               base64 -w 0 cert.p12          (Linux)
 #       Paste the resulting single-line string as the secret value.
 #
 #   APPLE_CERTIFICATE_PASSWORD

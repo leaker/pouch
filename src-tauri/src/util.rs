@@ -74,7 +74,7 @@ impl UserDataKind {
 /// path separator everywhere.
 ///
 /// Returns `None` if `$HOME` is missing — pouch then falls through to the
-/// portable `<exe parent>` layout, just like Linux/Windows.
+/// portable `<exe parent>` layout, just like Windows.
 #[cfg(target_os = "macos")]
 pub fn macos_app_support_dir() -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
@@ -122,7 +122,7 @@ pub fn reveal_pouch_folder() -> std::io::Result<()> {
 /// 2. **macOS prod** (`cfg(target_os = "macos")`, `not(debug_assertions)`):
 ///    `~/Library/Application Support/Pouch/<name>`. Falls through to step 3
 ///    if `$HOME` is unset (very unusual — but pouch should still boot).
-/// 3. **Portable prod** (Windows / Linux release; macOS fallback):
+/// 3. **Portable prod** (Windows release; macOS fallback):
 ///    `<current_exe parent>/<name>`. If `current_exe()` itself fails we
 ///    return `None` and the caller treats it as "not found".
 ///
@@ -141,7 +141,7 @@ pub fn user_data_path(kind: UserDataKind) -> Option<PathBuf> {
     }
 
     // Release builds. macOS first (with $HOME fallback to the portable
-    // layout), then Windows / Linux portable.
+    // layout), then Windows portable.
     #[cfg(target_os = "macos")]
     {
         if let Some(root) = macos_app_support_dir() {
@@ -232,25 +232,25 @@ pub(crate) fn lexical_normalize(p: &Path) -> PathBuf {
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
     #[test]
     fn collapses_parent_in_middle() {
         assert_eq!(lexical_normalize(Path::new("/a/b/../c")), PathBuf::from("/a/c"));
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
     #[test]
     fn collapses_trailing_parent() {
         assert_eq!(lexical_normalize(Path::new("/a/b/c/..")), PathBuf::from("/a/b"));
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
     #[test]
     fn drops_current_dir_segments() {
         assert_eq!(lexical_normalize(Path::new("/a/./b")), PathBuf::from("/a/b"));
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
     #[test]
     fn preserves_leading_parent_in_relative() {
         // Relative paths whose `..` escapes the start must keep the `..` —
@@ -258,7 +258,7 @@ mod tests {
         assert_eq!(lexical_normalize(Path::new("../foo")), PathBuf::from("../foo"));
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
     #[test]
     fn collapses_real_world_inject_path() {
         // The exact shape the user reported: src-tauri/.. cancels out.
@@ -268,7 +268,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
     #[test]
     fn cannot_pop_past_root() {
         // `..` against `/` stays at `/` (matches `path/filepath.Clean`).
@@ -276,27 +276,27 @@ mod tests {
         assert_eq!(lexical_normalize(Path::new("/../..")), PathBuf::from("/"));
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
     #[test]
     fn empty_input_becomes_dot() {
         assert_eq!(lexical_normalize(Path::new("")), PathBuf::from("."));
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
     #[test]
     fn relative_parent_after_segment_pops_segment_only() {
         // `a/b/../../c` should collapse to `c`, NOT to `../c`.
         assert_eq!(lexical_normalize(Path::new("a/b/../../c")), PathBuf::from("c"));
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
     #[test]
     fn relative_parent_then_segment_then_parent() {
         // `../a/..` keeps the leading `..` (no anchor) and folds the inner pair.
         assert_eq!(lexical_normalize(Path::new("../a/..")), PathBuf::from(".."));
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
     #[test]
     fn pretty_path_is_absolute_for_relative_input() {
         let cwd = std::env::current_dir().expect("cwd");

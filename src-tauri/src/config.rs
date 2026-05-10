@@ -3,7 +3,7 @@
 //! `hook.config.json` is read from (resolved by [`crate::util::user_data_path`]):
 //!   - dev: `<CARGO_MANIFEST_DIR>/../hook.config.json` (i.e. repo root).
 //!   - macOS prod: `~/Library/Application Support/Pouch/hook.config.json`.
-//!   - Windows / Linux prod: same directory as the running binary.
+//!   - Windows prod: same directory as the running binary.
 //!
 //! `cwd / hook.config.json` is consulted as a last-ditch fallback.
 //!
@@ -236,8 +236,8 @@ fn from_config_file() -> (Vec<String>, WindowDimensions) {
 ///
 /// In dev builds this resolves to `<CARGO_MANIFEST_DIR>/../hook.config.json`
 /// (the repo root). In macOS release builds it resolves to
-/// `~/Library/Application Support/Pouch/hook.config.json`. In Windows / Linux
-/// release builds it resolves to `<exe parent>/hook.config.json`.
+/// `~/Library/Application Support/Pouch/hook.config.json`. In Windows release
+/// builds it resolves to `<exe parent>/hook.config.json`.
 ///
 /// `cwd / hook.config.json` is appended unconditionally as a last-ditch
 /// fallback for users running pouch from a directory that happens to contain
@@ -246,7 +246,7 @@ fn candidate_config_paths() -> Vec<PathBuf> {
     let mut out = Vec::new();
 
     // Primary path — dev: repo root; macOS prod: ~/Library/.../Pouch/;
-    // Windows/Linux prod: <exe parent>/.
+    // Windows prod: <exe parent>/.
     if let Some(p) = user_data_path(UserDataKind::Config) {
         out.push(p);
     }
