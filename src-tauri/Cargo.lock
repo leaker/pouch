@@ -2989,6 +2989,7 @@ dependencies = [
  "chrono",
  "dispatch2",
  "http",
+ "http-body-util",
  "hudsucker",
  "hyper-tls",
  "hyper-util",

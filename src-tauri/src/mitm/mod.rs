@@ -141,7 +141,7 @@ pub fn start() -> Result<u16, MitmError> {
         .with_listener(tokio_listener)
         .with_ca(authority)
         .with_http_connector(https)
-        .with_http_handler(handler::PouchHandler)
+        .with_http_handler(handler::PouchHandler::default())
         .build()
         .map_err(|e| MitmError::Build(format!("{e:?}")))?;
 
