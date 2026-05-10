@@ -128,7 +128,7 @@ pub fn cache_window_dimensions(window_dimensions: WindowDimensions) {
 /// `WindowDimensions::default()` (`Mode(Inherit)` — first-launch fallback to
 /// the default 1280x960 geometry) if `cache_window_dimensions` was never
 /// called — defensive against a future refactor that drops the setup-time
-/// cache call; the fallback matches what the JSON loader picks for a missing
+/// cache call; the fallback matches what the TOML loader picks for a missing
 /// `window_dimensions` field in `hook.conf.toml`.
 fn current_window_dimensions() -> WindowDimensions {
     CACHED_WINDOW_DIMENSIONS.with(|c| c.get().copied().unwrap_or_default())
@@ -400,9 +400,9 @@ pub fn open_extra_window(
         }
     };
 
-    // Phase 2a: route this extra window's WKWebView through the local
-    // MITM proxy on macOS. Mirrors `lib.rs::create_main_window_with_url`
-    // — see that comment for the rationale and Windows-path note.
+    // Route this extra window's WKWebView through the local MITM proxy on
+    // macOS. Mirrors `lib.rs::create_main_window_with_url` — see that
+    // comment for the rationale and Windows-path note.
     #[cfg(target_os = "macos")]
     {
         builder = crate::mitm::apply_proxy_to_builder(builder);
@@ -475,8 +475,8 @@ pub fn open_extra_window(
 
 /// Shared `on_new_window` body: build a fresh Pouch window for a webview
 /// "new window request". Covers every WebKit/Chromium path that flows through
-/// `WKUIDelegate createWebViewWithConfiguration:` (or its WebView2 / WebKitGTK
-/// equivalents):
+/// `WKUIDelegate createWebViewWithConfiguration:` (or its WebView2
+/// equivalent):
 ///   - `window.open(url)`
 ///   - `<a href target="_blank">` clicks
 ///   - `<form target="_blank">` submissions (both GET and POST)

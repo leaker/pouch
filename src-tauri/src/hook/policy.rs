@@ -1,23 +1,25 @@
-//! Platform-agnostic request policy: decides whether a single intercepted
+//! Request policy used **only** by the Windows WebView2
+//! `WebResourceRequested` interceptor: decides whether a single intercepted
 //! request should be served from the local cache, fetched from upstream and
 //! cached, fetched without caching (ignore-list), or surfaced as a network
 //! error to the webview.
 //!
-//! This module contains zero platform-specific code; the Windows and macOS
-//! interceptors (phase H/I) call `evaluate` and translate the returned
-//! [`Decision`] into platform responses.
+//! The macOS path runs on the hudsucker MITM proxy (see
+//! [`crate::mitm::handler`]) and consults [`crate::cache_store`] /
+//! [`crate::hook::ignore_filter`] directly, bypassing this module entirely.
 //!
 //! # Why only two decision variants
 //!
-//! The macOS path uses `NSURLProtocol`, where once `-startLoading` is invoked
-//! the protocol implementation **must** produce a response — there is no way
-//! to fall back to the webview's default networking mid-load. To keep the
-//! Windows and macOS platform layers symmetrical, the policy layer hides this
-//! constraint by always returning either a complete response (`Respond`) or a
-//! "give up, surface the error" outcome (`Bypass`). Ignore-list matches and
-//! cache misses both end up as `Respond`; only an unrecoverable upstream
-//! failure (timeout, network error, non-2xx, body read error, missing host)
-//! becomes `Bypass`.
+//! WebView2's `WebResourceRequested` deferral has a strict completion
+//! contract: once we've called `Deferral.Complete()` for an event we accepted
+//! a filter on, the runtime requires us to have produced a response —
+//! falling through to the default loader mid-event is not supported. The
+//! policy layer encodes this by always returning either a complete response
+//! (`Respond`) or a "give up, surface the error" outcome (`Bypass`).
+//! Ignore-list matches and cache misses both end up as `Respond`; only an
+//! unrecoverable upstream failure (timeout, network error, non-2xx, body
+//! read error, missing host) becomes `Bypass`, which the platform layer
+//! turns into a `502 Bad Gateway` so the webview shows a network error.
 //!
 //! Method gating (only GET is cacheable) lives in the platform layer — non-GET
 //! requests must short-circuit before reaching here.
@@ -180,13 +182,14 @@ fn forward_response_headers(
 ///
 /// `request_headers` are forwarded to the upstream request on cache miss /
 /// ignore-list passthrough (e.g. `Range`, `Accept-Language`, `Accept-Encoding`).
-/// Callers should NOT pass cookie / auth headers from the webview here — see
-/// the "Cookie isolation" caveat in `tasks/todo.md` §14.
+/// Callers should NOT pass cookie / auth headers from the webview here —
+/// the cookie jar is owned by the WebView2 runtime and replaying its
+/// cookies through reqwest could leak a session cookie cross-origin.
 pub async fn evaluate(url: &str, request_headers: &http::HeaderMap) -> Decision {
     // 1. Ignore-list: do not consult the cache, do not write the cache, but
     //    still fetch the response upstream so the platform layer can serve it
-    //    (NSURLProtocol semantics require us to produce a body once we've
-    //    accepted the load — see module-level docs).
+    //    (WebView2 deferral semantics: once we've called Deferral.complete(),
+    //    we must produce a response.)
     if ignore_filter::is_ignored(url) {
         info!(target: "hook", "PASSTHROUGH reason=ignore url={}", url);
         return fetch_only(url, request_headers).await;

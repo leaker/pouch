@@ -2,16 +2,10 @@
 //!
 //! # Design
 //!
-//! This is the symmetric counterpart of [`super::macos`]: same `policy::evaluate`
-//! contract, same two-state `Decision::{Respond, Bypass}` outcome, same
-//! "intercept exactly the remote target — never local trampoline pages".
-//!
 //! 1. `install_for_webview()` is called from the Tauri `setup` hook (lib.rs)
 //!    *after* the main `WebviewWindow` has been built programmatically. At
 //!    that point `app.get_webview_window("main")` resolves and we can drive
-//!    `with_webview` to reach the WebView2 controller. (The macOS counterpart
-//!    runs as `install_global` *before* webview creation; see
-//!    `super::install_global`.)
+//!    `with_webview` to reach the WebView2 controller.
 //!
 //! 2. We acquire `ICoreWebView2Controller` + `ICoreWebView2Environment` via
 //!    Tauri's `with_webview` bridge. The closure is dispatched onto the UI
@@ -34,11 +28,12 @@
 //!    environment handles in a small `unsafe impl Send` newtype. The wrapper
 //!    is only ever read on the UI thread (via `run_on_main_thread`); the
 //!    tokio worker holds it as opaque ownership and does not touch any
-//!    COM methods. This mirrors macOS's `unsafe impl Send for HookURLProtocol`
-//!    pattern (which is sound for the same reason — COM/objc state is only
-//!    mutated on the main thread).
+//!    COM methods. The handles' refcount manipulation that does happen on
+//!    Drop in the worker thread (if `run_on_main_thread` fails and we drop
+//!    on the tokio thread) is `Release`, which is apartment-neutral for
+//!    free-threaded marshallable interfaces.
 //!
-//! # Local-host bypass (parity with macOS Fix 1)
+//! # Local-host bypass
 //!
 //! Tauri's dev-server (and the production index) is served from
 //! `127.0.0.1` / `localhost`. Hooking those would intercept the trampoline
@@ -46,19 +41,17 @@
 //! to. `is_local_host` short-circuits the handler in that case and we do not
 //! call `SetResponse`, leaving the webview to handle the request natively.
 //!
-//! # Conditional headers (parity with macOS Fix 2)
+//! # Conditional headers
 //!
 //! `http_fetcher::fetch` strips conditional request headers
 //! (`If-None-Match` / `If-Modified-Since` / `If-Match` / `If-Unmodified-Since` /
-//! `If-Range`) before forwarding upstream. This is platform-agnostic so the
-//! Windows path benefits without any extra work — we just transparently
-//! forward whatever the webview sent and let the fetcher clean it up.
+//! `If-Range`) before forwarding upstream — we just transparently forward
+//! whatever the webview sent and let the fetcher clean it up.
 //!
 //! # Why not `tauri::async_runtime`
 //!
-//! Same reason as the macOS module: tauri's runtime is single-threaded and
-//! shared with the main loop. We need a worker pool so policy IO can't starve
-//! the UI thread.
+//! Tauri's runtime is single-threaded and shared with the main loop. We need
+//! a worker pool so policy IO can't starve the UI thread.
 //!
 //! # `Bypass` semantics
 //!
@@ -91,7 +84,7 @@ use windows::Win32::UI::Shell::SHCreateMemStream;
 use crate::hook::policy::{self, Decision};
 
 /// Multi-thread tokio runtime used to drive `policy::evaluate` from the
-/// `WebResourceRequested` handler. Symmetric to `macos::TOKIO_RT`.
+/// `WebResourceRequested` handler.
 static TOKIO_RT: OnceLock<TokioRuntime> = OnceLock::new();
 
 fn rt() -> &'static TokioRuntime {
@@ -236,13 +229,13 @@ fn handle_request<R: Runtime>(
     };
 
     // Only GET is cacheable / hookable. Returning without calling SetResponse
-    // lets the webview perform the request natively (matches macOS bypass).
+    // lets the webview perform the request natively.
     if !method.eq_ignore_ascii_case("GET") {
         return;
     }
 
     // Local-host bypass. Tauri's dev server / production trampoline is local;
-    // never hook it (parity with macOS::is_local_host).
+    // never hook it.
     let host = url::Url::parse(&url)
         .ok()
         .and_then(|u| u.host_str().map(|h| h.to_ascii_lowercase()))
@@ -317,7 +310,7 @@ unsafe fn snapshot_request(
 
 /// Iterate `ICoreWebView2HttpRequestHeaders` into `http::HeaderMap`. Invalid
 /// header names/values (per `http`'s strict validation) are dropped with a
-/// debug log rather than failing the whole conversion — matches macOS.
+/// debug log rather than failing the whole conversion.
 unsafe fn headers_to_http(
     request: &webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2WebResourceRequest,
 ) -> Result<http::HeaderMap, String> {
@@ -472,9 +465,8 @@ unsafe fn build_and_set_error(
 }
 
 /// Returns true if `host` (already lower-cased) refers to the local machine.
-/// Mirrors `macos::is_local_host` exactly for cross-platform parity. Kept
-/// duplicated rather than shared in `policy` because policy is platform-agnostic
-/// and never sees these requests — they're filtered out before policy is called.
+/// Filtered out at the platform layer before policy is consulted, so policy
+/// itself never sees these requests.
 fn is_local_host(host: &str) -> bool {
     if host.is_empty() {
         return true;
@@ -493,7 +485,7 @@ fn is_local_host(host: &str) -> bool {
 /// worker only owns the bundle for storage purposes and never invokes any
 /// method on it. Every actual COM call (`SetResponse`, `Complete`) happens
 /// inside the `run_on_main_thread` closure that runs on the originating UI
-/// thread, mirroring macOS's main-queue hop pattern.
+/// thread.
 ///
 /// Justification for `unsafe impl Send`:
 ///   1. We never read/write Tauri-owned COM apartment state off the UI thread.

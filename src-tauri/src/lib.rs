@@ -554,8 +554,9 @@ pub fn run() {
                 }
                 if let tauri::RunEvent::ExitRequested { code, .. } = event {
                     // Tauri 在所有 window 关闭后发出 ExitRequested（macOS 不自动退）。
-                    // hook-tokio runtime 是 OnceLock 永不 drop，无法 graceful shutdown，
-                    // 必须强杀。直接 std::process::exit 绕开 Tauri 派发，避免
+                    // mitm-tokio (macOS) 与 hook-tokio (Windows) runtime 都是
+                    // OnceLock 永不 drop，无法 graceful shutdown，必须强杀。
+                    // 直接 std::process::exit 绕开 Tauri 派发，避免
                     // AppHandle::exit 内部 re-emit ExitRequested 形成无限递归
                     // (RuntimeRunEvent::ExitRequested -> RunEvent::ExitRequested -> callback
                     //  -> AppHandle::exit -> RuntimeRunEvent::ExitRequested ... 22 次实证)。
@@ -1039,10 +1040,11 @@ fn init_tracing() {
 
 /// Install a process-wide panic hook that funnels panics through `tracing`
 /// (target `hook`, level `error`) so panics on background threads —
-/// `hook-tokio` workers, `dispatch_async` blocks, Tauri event listeners —
-/// surface in the standard log stream instead of being silently swallowed
-/// when the default hook's stderr message races with the close path. Keeps
-/// the panic location/payload but does **not** abort: matches the default
+/// `mitm-tokio` workers (macOS) / `hook-tokio` workers (Windows), Tauri
+/// event listeners, the WebView2 `WebResourceRequested` handler — surface
+/// in the standard log stream instead of being silently swallowed when the
+/// default hook's stderr message races with the close path. Keeps the
+/// panic location/payload but does **not** abort: matches the default
 /// hook's "log + unwind" semantics.
 fn install_panic_hook() {
     std::panic::set_hook(Box::new(|info| {

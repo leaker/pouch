@@ -6,7 +6,7 @@
 # the URL filter that bypasses the on-disk cache.
 #
 # Resolved location depends on the build:
-#   - dev tree (`bun run tauri dev`): <repo>/hook.conf.toml
+#   - dev tree (`cargo dev`):        <repo>/hook.conf.toml
 #   - macOS release (Pouch.app):     ~/Library/Application Support/Pouch/hook.conf.toml
 #                                    (seeded on first launch from the .app
 #                                     bundle's Contents/Resources/sample/)

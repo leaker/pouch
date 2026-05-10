@@ -1,7 +1,7 @@
-//! Phase 3 hudsucker handler — wires the platform-agnostic cache_store and
-//! ignore_filter modules into the MITM pipeline so the proxy path has parity
-//! with the legacy NSURLProtocol path. Non-GET, ignore-list, and CONNECT-
-//! passthrough requests still fall through unchanged.
+//! hudsucker handler that wires `cache_store` and `ignore_filter` into the
+//! MITM pipeline. macOS's sole interception path (NSURLProtocol was retired
+//! in v2.0). Non-GET, ignore-list, and CONNECT-passthrough requests still
+//! fall through unchanged.
 //!
 //! Per-request state lives on `&mut self`: hudsucker's `InternalProxy::proxy`
 //! clones the handler per request inside one connection (see hudsucker

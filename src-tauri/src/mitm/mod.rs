@@ -1,22 +1,16 @@
-//! MITM HTTPS proxy entry point. macOS-only — Windows uses WebView2's
-//! `WebResourceRequested` API natively (see `hook/platform/windows.rs`) so
-//! we never need a proxy there.
+//! Local HTTPS MITM proxy (macOS only). Generates and persists a self-signed
+//! root CA, prompts the user once to trust it via NSAlert, and routes the
+//! WKWebView through `127.0.0.1:<auto-port>` via Tauri's `macos-proxy` feature.
 //!
-//! Phase 1 PoC:
-//! - Generate / load a persistent root CA at
-//!   `~/Library/Application Support/Pouch/ca/pouch-ca.{pem,key}`.
-//! - Bind a hudsucker proxy on `127.0.0.1:0` (kernel-picked port).
-//! - Run a passthrough handler ([`handler::PouchHandler`]) on a dedicated
-//!   `mitm-tokio` multi-thread runtime — independent of the existing
-//!   `hook-tokio` runtime so a crash / shutdown in one cannot disturb the
-//!   other.
+//! The handler ([`handler::PouchHandler`]) consults [`crate::cache_store`]
+//! and [`crate::hook::ignore_filter`] on every request, short-circuiting
+//! cache HITs locally and writing back upstream MISSes. The companion
+//! [`learned::LearnerLayer`] observes hudsucker error events and self-learns
+//! hosts that need to bypass MITM (cert pinning, legacy TLS).
 //!
-//! The webview is **not** yet pointed at this proxy — that's Phase 2 (wry
-//! `with_proxy_config` / Tauri `.proxy_url`). Phase 1 ships only the bound,
-//! curl-verifiable proxy so the team-lead can confirm CA + handler wiring
-//! work before the real integration lands.
-//!
-//! Module visibility is gated by the `#[cfg(target_os = "macos")] mod mitm;`
+//! Windows uses WebView2's `WebResourceRequested` API natively (see
+//! `hook/platform/windows.rs`) so we never need a proxy there. Module
+//! visibility is gated by the `#[cfg(target_os = "macos")] mod mitm;`
 //! declaration in `lib.rs`; no inner cfg attribute is needed here.
 
 mod ca;
@@ -44,15 +38,13 @@ pub enum MitmError {
     Trust(String),
 }
 
-/// Set on successful [`start`] so other modules (Phase 2 will be the webview
-/// builder) can ask "what port did the proxy bind to?" without re-running
-/// startup.
+/// Set on successful [`start`] so other modules (the webview builder) can
+/// ask "what port did the proxy bind to?" without re-running startup.
 static PROXY_PORT: OnceLock<u16> = OnceLock::new();
 
 /// Dedicated multi-thread runtime that drives the hudsucker server task.
-/// Kept separate from `hook-tokio` (used by `NSURLProtocol` / reqwest) so the
-/// two have no shared scheduler — the v2 NSURLProtocol path is being
-/// retired in favour of MITM, but they coexist in the codebase until Phase 4.
+/// Kept separate from `hook-tokio` (the Windows path's reqwest runtime) so
+/// the two have no shared scheduler.
 static MITM_RT: OnceLock<Runtime> = OnceLock::new();
 
 /// Start the MITM proxy. Synchronously installs the rustls aws-lc-rs
@@ -168,9 +160,8 @@ pub fn start() -> Result<u16, MitmError> {
     Ok(port)
 }
 
-/// Port the proxy is listening on, if [`start`] succeeded. Reserved for
-/// Phase 2 — the webview builder will read this to set `with_proxy_config`.
-#[allow(dead_code)]
+/// Port the proxy is listening on, if [`start`] succeeded. Read by
+/// [`apply_proxy_to_builder`] when configuring each WKWebView.
 pub fn proxy_port() -> Option<u16> {
     PROXY_PORT.get().copied()
 }
@@ -205,9 +196,8 @@ const POUCH_DATA_STORE_ID: [u8; 16] = [
     0x1E, 0x29, 0x5A, 0x15, 0xF7, 0x23, 0x47, 0x32, 0xA4, 0xE4, 0x62, 0xA8, 0xE8, 0x99, 0x46, 0xC6,
 ];
 
-/// Phase 2a + Phase 3: configure a [`tauri::WebviewWindowBuilder`] for the
-/// macOS WKWebView path. Two responsibilities, intentionally chained in
-/// this order:
+/// Configure a [`tauri::WebviewWindowBuilder`] for the macOS WKWebView path.
+/// Two responsibilities, intentionally chained in this order:
 ///
 /// 1. **`.data_store_identifier(...)`** — pin the WKWebView to a
 ///    `dataStoreForIdentifier:`-backed `WKWebsiteDataStore` so cookies
@@ -225,9 +215,9 @@ const POUCH_DATA_STORE_ID: [u8; 16] = [
 ///
 /// No-ops gracefully (returns `builder` unchanged with a log line) when
 /// either the proxy hasn't started yet or the localhost URL fails to
-/// parse — neither should happen in practice (Phase 1's setup guarantees
-/// `start()` runs before any webview is created), but we don't want a
-/// spurious panic to take down the entire window-creation path.
+/// parse — neither should happen in practice (setup guarantees `start()`
+/// runs before any webview is created), but we don't want a spurious
+/// panic to take down the entire window-creation path.
 ///
 /// macOS-only: Windows uses WebView2's native `WebResourceRequested`
 /// API (see `hook/platform/windows.rs`), so the windows builder does
@@ -236,10 +226,10 @@ const POUCH_DATA_STORE_ID: [u8; 16] = [
 pub fn apply_proxy_to_builder<R: tauri::Runtime, M: tauri::Manager<R>>(
     builder: tauri::WebviewWindowBuilder<'_, R, M>,
 ) -> tauri::WebviewWindowBuilder<'_, R, M> {
-    // Phase 3: pin to a per-identifier data store so cookies persist on
-    // unsigned binaries. Always applied regardless of proxy state — the
-    // two configs are independent and the cookie fix matters even if
-    // the proxy somehow failed to start.
+    // Pin to a per-identifier data store so cookies persist on unsigned
+    // binaries. Always applied regardless of proxy state — the two configs
+    // are independent and the cookie fix matters even if the proxy somehow
+    // failed to start.
     let builder = builder.incognito(false).data_store_identifier(POUCH_DATA_STORE_ID);
     tracing::info!(
         target: "hook",
@@ -268,7 +258,7 @@ pub fn apply_proxy_to_builder<R: tauri::Runtime, M: tauri::Manager<R>>(
     }
 }
 
-/// Phase 2b: ensure the persistent Pouch CA is trusted by macOS for SSL.
+/// Ensure the persistent Pouch CA is trusted by macOS for SSL.
 /// Called once during `lib.rs::setup` *after* [`start`] has materialised the
 /// CA on disk. Flow:
 ///
