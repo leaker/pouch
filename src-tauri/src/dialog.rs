@@ -24,10 +24,20 @@
 use std::cell::OnceCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use tauri::webview::NewWindowResponse;
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
 use crate::config::{WindowDimensions, WindowDimensionsMode};
 use crate::util::{DEFAULT_WINDOW_HEIGHT, DEFAULT_WINDOW_WIDTH};
+
+/// Tauri-managed wrapper around the optional `inject/*.js` dispatcher script
+/// built once at startup (see `inject::build_dispatcher_js`). Stored in the
+/// state map by `lib.rs::setup` so any window-creation path — including the
+/// `on_new_window` callback that handles `<a target="_blank">` /
+/// `<form target="_blank">` / `window.open()` — can fetch the same dispatcher
+/// source via [`AppHandle::try_state`] without having to thread it through
+/// function signatures.
+pub struct DispatcherState(pub Option<String>);
 
 #[cfg(target_os = "macos")]
 use objc2::{msg_send, rc::Retained, runtime::AnyObject, MainThreadOnly};
@@ -398,6 +408,28 @@ pub fn open_extra_window(
         builder = crate::mitm::apply_proxy_to_builder(builder);
     }
 
+    // Apply the same `inject/*.js` dispatcher the main window uses, sourced
+    // from `DispatcherState` (managed once at startup). Reading from state
+    // here means startup-tail / Cmd+N / `window.open` / `<a target=_blank>` /
+    // `<form target=_blank>` paths all converge on the same script source —
+    // there's nothing window-specific about it.
+    if let Some(state) = app.try_state::<DispatcherState>() {
+        if let Some(js) = state.0.as_deref() {
+            builder = builder.initialization_script(js);
+        }
+    }
+
+    // Hook every webview-initiated new-window request — `window.open(url)`,
+    // `<a target="_blank">`, and `<form target="_blank">` submissions — so
+    // each becomes a full Pouch window (proxy + data store + inject) by
+    // recursing through `open_extra_window`. See
+    // [`spawn_pouch_window_for_request`] for the contract, including the
+    // POST-form body limitation imposed by wry's URL-only callback.
+    let app_for_cb = app.clone();
+    builder = builder.on_new_window(move |url, _features| {
+        spawn_pouch_window_for_request(&app_for_cb, url)
+    });
+
     let window = builder.build()?;
     tracing::debug!(
         target: "hook",
@@ -439,4 +471,86 @@ pub fn open_extra_window(
     crate::install_window_state_listener(&window);
 
     Ok(window)
+}
+
+/// Shared `on_new_window` body: build a fresh Pouch window for a webview
+/// "new window request". Covers every WebKit/Chromium path that flows through
+/// `WKUIDelegate createWebViewWithConfiguration:` (or its WebView2 / WebKitGTK
+/// equivalents):
+///   - `window.open(url)`
+///   - `<a href target="_blank">` clicks
+///   - `<form target="_blank">` submissions (both GET and POST)
+///
+/// Validates the URL is http(s), allocates a unique label via
+/// [`next_window_label`], and recurses through [`open_extra_window`] so the new
+/// window inherits the full Pouch builder chain (proxy, data store, inject
+/// scripts, title sync, dimensions, ...).
+///
+/// ## `<form target="_blank">` behaviour
+///
+/// wry 0.55.1's `on_new_window` callback signature is
+/// `Fn(String, NewWindowFeatures) -> NewWindowResponse` — only the URL string
+/// and a `{ size, position, opener }` features struct. Neither wry nor Tauri
+/// surfaces the originating `WKNavigationAction`, so the HTTP method, headers
+/// and request body are **not** observable from this callback.
+///
+/// Consequences:
+///   - **GET form**: every input is encoded into the URL's query string by
+///     WebKit before the new-window request fires, so spawning a fresh Pouch
+///     window that GETs that URL reproduces the form submission exactly.
+///     This works.
+///   - **POST form**: the body is dropped on the floor by the time we see the
+///     request. The new Pouch window will issue a plain GET against the form's
+///     `action` URL. Servers that accept GET on the same endpoint (rendering
+///     the form page, redirecting, etc.) will respond reasonably; servers that
+///     hard-require POST will return a 405 / 404 / form re-render. We accept
+///     this limitation because the alternative (intercepting form submits in
+///     injected JS and replaying them in the new window) is invasive enough
+///     to risk breaking sites' own form handling. Sites that genuinely need
+///     POST-with-new-window are rare in practice.
+///
+/// ## Why `Deny`
+///
+/// Always returns `NewWindowResponse::Deny` so WebKit does **not** create a
+/// new `WKWebView` for this request. Returning `Create { webview }` with a
+/// webview that wasn't built from the `WKWebViewConfiguration` WebKit hands
+/// us in `createWebViewWithConfiguration:` triggers an `NSException`
+/// ("Returned WKWebView was not created with the given configuration."),
+/// which crashes the app. By denying we tell WebKit "no synthetic child
+/// webview" and instead spawn a fully independent Pouch window in parallel
+/// — the user sees a new top-level window appear, identical UX-wise to a
+/// browser's `_blank` behaviour.
+///
+/// `open_extra_window` is invoked synchronously here: this callback is
+/// reached from `WKUIDelegate createWebViewWithConfiguration:` which runs
+/// on the AppKit main thread, the same thread `NSWindow` /
+/// `WKWebView::initWithFrame_configuration` require. No async hop needed.
+/// On `build()` failure (e.g. label collision) we log and still return
+/// `Deny`; the click / `window.open` / form submit then has no visible effect
+/// (the only sensible UX — the URL was unusable).
+pub(crate) fn spawn_pouch_window_for_request(
+    app: &AppHandle,
+    url: url::Url,
+) -> NewWindowResponse<tauri::Wry> {
+    if url.scheme() != "http" && url.scheme() != "https" {
+        tracing::warn!(
+            target: "hook",
+            "[new-window] webview requested non-http(s) URL; denying: {url}"
+        );
+        return NewWindowResponse::Deny;
+    }
+
+    let label = next_window_label();
+    let dims = current_window_dimensions();
+    match open_extra_window(app, &label, url, dims) {
+        Ok(_) => tracing::debug!(
+            target: "hook",
+            "[new-window] spawned label={label} from webview request"
+        ),
+        Err(e) => tracing::warn!(
+            target: "hook",
+            "[new-window] failed to create window {label}: {e}"
+        ),
+    }
+    NewWindowResponse::Deny
 }

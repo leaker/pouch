@@ -385,6 +385,14 @@ pub fn run() {
                 if dispatcher.is_some() { "WILL be" } else { "will NOT be" },
             );
 
+            // Stash the dispatcher in Tauri state so every window-creation
+            // path — startup tail, Cmd+N, and the `on_new_window` callback
+            // that handles `window.open` / `<a target=_blank>` /
+            // `<form target=_blank>` — sees the same source without threading
+            // it through signatures. See `dialog::DispatcherState` doc for
+            // the rationale.
+            app.manage(dialog::DispatcherState(dispatcher.clone()));
+
             // 3. Build the main webview + any extra startup windows from
             //    `cfg.startup_urls`. The first valid entry becomes the main
             //    window (label "main" — hard-wired because the Windows hook
@@ -692,6 +700,17 @@ fn create_main_window_with_url(
     if let Some(js) = dispatcher {
         builder = builder.initialization_script(js);
     }
+
+    // Hook every webview-initiated new-window request — `window.open(url)`,
+    // `<a target="_blank">`, and `<form target="_blank">` submissions — so
+    // each becomes a full Pouch window (proxy + data store + inject) by
+    // recursing through `dialog::open_extra_window`. See
+    // `dialog::spawn_pouch_window_for_request` for the contract, including
+    // the GET-vs-POST form behaviour notes.
+    let app_for_cb = app.handle().clone();
+    builder = builder.on_new_window(move |url, _features| {
+        dialog::spawn_pouch_window_for_request(&app_for_cb, url)
+    });
 
     let main_window = builder.build()?;
     tracing::debug!(
