@@ -993,12 +993,26 @@ pub(crate) fn page_load_handler(
 /// `info`. Using `try_init` so a host application that already installed a
 /// subscriber (tests, embedding) doesn't panic.
 fn init_tracing() {
+    // Per-layer filtering: EnvFilter (TAURI_HOOK_LOG) gates only the fmt
+    // layer, so user-supplied filters like `hook=debug` don't accidentally
+    // suppress events the LearnerLayer needs. LearnerLayer does its own
+    // target/level filtering inside on_event.
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    use tracing_subscriber::Layer;
+
     let env_filter =
         EnvFilter::try_from_env("TAURI_HOOK_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(env_filter)
+    let fmt_layer = tracing_subscriber::fmt::layer()
         .with_timer(ChronoLocal::new("%Y-%m-%d %H:%M:%S".to_string()))
-        .try_init();
+        .with_filter(env_filter);
+
+    let registry = tracing_subscriber::registry().with(fmt_layer);
+    // LearnerLayer 自己 on_event 内做 target+level 过滤；外层 with_filter
+    // (Targets) 实测会导致 on_event 完全收不到 event，故不再包裹。
+    #[cfg(target_os = "macos")]
+    let registry = registry.with(crate::mitm::LearnerLayer);
+    let _ = registry.try_init();
 }
 
 /// Install a process-wide panic hook that funnels panics through `tracing`

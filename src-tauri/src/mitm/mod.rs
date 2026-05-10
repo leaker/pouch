@@ -21,7 +21,10 @@
 
 mod ca;
 mod handler;
+mod learned;
 mod trust;
+
+pub use learned::{is_learned_passthrough, load_learned_passthrough, LearnerLayer};
 
 use std::net::SocketAddr;
 use std::sync::OnceLock;
@@ -61,6 +64,13 @@ static MITM_RT: OnceLock<Runtime> = OnceLock::new();
 pub fn start() -> Result<u16, MitmError> {
     if let Some(&port) = PROXY_PORT.get() {
         return Ok(port);
+    }
+
+    // Load learned passthrough hosts before binding so the very first
+    // request after restart already benefits from prior learning.
+    match load_learned_passthrough() {
+        Ok(n) => tracing::info!(target: "hook", "[mitm] loaded {n} learned passthrough entries"),
+        Err(e) => tracing::warn!(target: "hook", "[mitm] load learned passthrough failed: {e}"),
     }
 
     // hudsucker's RcgenAuthority requires a process-wide `CryptoProvider`.
