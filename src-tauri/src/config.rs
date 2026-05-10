@@ -1,11 +1,11 @@
 //! Startup configuration loader for Pouch.
 //!
-//! `hook.config.json` is read from (resolved by [`crate::util::user_data_path`]):
-//!   - dev: `<CARGO_MANIFEST_DIR>/../hook.config.json` (i.e. repo root).
-//!   - macOS prod: `~/Library/Application Support/Pouch/hook.config.json`.
+//! `hook.conf.toml` is read from (resolved by [`crate::util::user_data_path`]):
+//!   - dev: `<CARGO_MANIFEST_DIR>/../hook.conf.toml` (i.e. repo root).
+//!   - macOS prod: `~/Library/Application Support/Pouch/hook.conf.toml`.
 //!   - Windows prod: same directory as the running binary.
 //!
-//! `cwd / hook.config.json` is consulted as a last-ditch fallback.
+//! `cwd / hook.conf.toml` is consulted as a last-ditch fallback.
 //!
 //! Failures at any step are logged at `warn` and we fall through to the next
 //! candidate; Pouch should always boot successfully even with no config
@@ -18,7 +18,14 @@
 //! and `windows` (array) have been **unified** into a single `startup_urls`
 //! array — first entry becomes the main window, the rest become extra
 //! windows. This is a hard schema break with no deprecation alias; users
-//! upgrading from v1.0.x must migrate their `hook.config.json` by hand.
+//! upgrading from v1.0.x must migrate their config by hand.
+//!
+//! Format note: as of v1.1.4, the user-facing config file has moved from
+//! `hook.config.json` to `hook.conf.toml`. The schema is unchanged (TOML maps
+//! cleanly to the same serde types), but the format switch lets the shipped
+//! sample carry rich inline documentation that JSON cannot. Users with an
+//! existing `hook.config.json` will see a one-line WARN at startup pointing
+//! to the new filename — migration is by hand (no auto-rewrite of user data).
 
 use std::path::PathBuf;
 
@@ -37,26 +44,26 @@ pub struct Config {
     /// guaranteed to be valid http(s) URL **strings** at this point —
     /// non-http(s) entries are dropped at load time with a `warn` log
     /// (per-entry URL parsing for window creation still happens at use site
-    /// in `lib.rs::run`). Empty when the JSON omits the field, supplies
-    /// `null`, supplies `[]`, or every entry was dropped as invalid; the
-    /// startup path then prompts the user via `NSAlert`.
+    /// in `lib.rs::run`). Empty when the TOML omits the field, supplies an
+    /// empty value, supplies `[]`, or every entry was dropped as invalid;
+    /// the startup path then prompts the user via `NSAlert`.
     #[serde(default)]
     pub startup_urls: Vec<String>,
     /// Resolved window dimensions (never `Option` — defaults to
-    /// [`WindowDimensions::default`] when missing from the JSON).
+    /// [`WindowDimensions::default`] when missing from the file).
     #[serde(default)]
     pub window_dimensions: WindowDimensions,
 }
 
-/// On-disk schema for `hook.config.json`. Kept separate from `Config` so
+/// On-disk schema for `hook.conf.toml`. Kept separate from `Config` so
 /// future fields can be optional in the file but always-resolved at runtime.
 #[derive(Debug, Deserialize)]
 struct ConfigFile {
     /// Optional list of URLs to open at startup. First entry becomes the
     /// main window, subsequent entries become extra windows. Each entry must
     /// be http(s); non-http(s) / unparseable entries are dropped with a warn
-    /// at load time. Missing / null / empty all mean "prompt the user via
-    /// NSAlert at startup" — see `lib.rs::run`.
+    /// at load time. Missing / empty all mean "prompt the user via NSAlert
+    /// at startup" — see `lib.rs::run`.
     #[serde(default)]
     startup_urls: Option<Vec<String>>,
     /// Optional window dimensions. Missing → [`WindowDimensions::default`].
@@ -64,7 +71,7 @@ struct ConfigFile {
     window_dimensions: Option<WindowDimensions>,
     /// Optional ignoreUrls list — see `hook/ignore_filter.rs` for the
     /// per-entry pattern syntax. Compiled into the global matcher set at
-    /// startup; missing/null/empty all mean "no filtering".
+    /// startup; missing/empty all mean "no filtering".
     #[serde(default)]
     ignore_urls: Option<Vec<IgnoreEntry>>,
 }
@@ -72,7 +79,7 @@ struct ConfigFile {
 /// Initial window dimensions. VSCode-style naming: the string variants mirror
 /// VSCode's `window.newWindowDimensions` semantics for clarity.
 ///
-/// JSON shapes:
+/// TOML shapes:
 /// - `"default"`    → ordinary floating window at the
 ///   `DEFAULT_WINDOW_{WIDTH,HEIGHT}` (1280x960) baseline; not maximised, not
 ///   fullscreen.
@@ -84,13 +91,13 @@ struct ConfigFile {
 /// - `"maximized"`  → fill the work area (excludes macOS menubar/dock or
 ///   Windows taskbar).
 /// - `"fullscreen"` → real fullscreen, hides window chrome.
-/// - `{ "width": 1280, "height": 800 }` → fixed logical pixel size.
+/// - `{ width = 1280, height = 800 }` → fixed logical pixel size.
 #[derive(Debug, Deserialize, Serialize, Clone, Copy)]
 #[serde(untagged)]
 pub enum WindowDimensions {
     /// String mode: `"default"` | `"inherit"` | `"maximized"` | `"fullscreen"`.
     Mode(WindowDimensionsMode),
-    /// Pixel size: `{ "width": <px>, "height": <px> }`. `u32` deserialisation
+    /// Pixel size: `{ width = <px>, height = <px> }`. `u32` deserialisation
     /// already rejects negatives; zero values fall back to default at apply
     /// time (see `lib.rs`).
     Size { width: u32, height: u32 },
@@ -117,16 +124,16 @@ impl Default for WindowDimensions {
     }
 }
 
-/// Load the runtime configuration from `hook.config.json`. Never panics.
+/// Load the runtime configuration from `hook.conf.toml`. Never panics.
 ///
 /// Side effect: regardless of whether `startup_urls` is present, the
-/// `hook.config.json` file's `ignore_urls` rules are installed into the
+/// `hook.conf.toml` file's `ignore_urls` rules are installed into the
 /// global matcher set — these concerns are independent.
 ///
 /// Safe to call multiple times: the ignore-rule installation is an atomic
 /// replace (see [`crate::hook::ignore_filter::set_matchers`]), so the runtime
 /// Reload path simply re-invokes [`load`] to pick up edits to
-/// `hook.config.json` without restarting.
+/// `hook.conf.toml` without restarting.
 pub fn load() -> Config {
     let (startup_urls, window_dimensions) = from_config_file();
     Config {
@@ -139,9 +146,9 @@ fn looks_like_url(s: &str) -> bool {
     s.starts_with("http://") || s.starts_with("https://")
 }
 
-/// Find and parse `hook.config.json`, returning:
+/// Find and parse `hook.conf.toml`, returning:
 /// - the resolved list of startup URLs (filtered to valid http(s) URLs only,
-///   empty when the field is missing/null/empty or every candidate failed to
+///   empty when the field is missing/empty or every candidate failed to
 ///   parse),
 /// - the resolved `WindowDimensions` (defaulted when missing or when no
 ///   candidate parsed successfully).
@@ -154,9 +161,11 @@ fn from_config_file() -> (Vec<String>, WindowDimensions) {
     let mut window_dimensions = WindowDimensions::default();
     let mut startup_urls: Vec<String> = Vec::new();
 
+    warn_if_legacy_json_present();
+
     for candidate in candidate_config_paths() {
         match std::fs::read_to_string(&candidate) {
-            Ok(text) => match serde_json::from_str::<ConfigFile>(&text) {
+            Ok(text) => match toml::from_str::<ConfigFile>(&text) {
                 Ok(parsed) => {
                     // Install ignore_urls regardless of whether startup_urls
                     // is present/non-empty — these are independent concerns
@@ -234,12 +243,12 @@ fn from_config_file() -> (Vec<String>, WindowDimensions) {
 
 /// All locations we will try, in priority order.
 ///
-/// In dev builds this resolves to `<CARGO_MANIFEST_DIR>/../hook.config.json`
+/// In dev builds this resolves to `<CARGO_MANIFEST_DIR>/../hook.conf.toml`
 /// (the repo root). In macOS release builds it resolves to
-/// `~/Library/Application Support/Pouch/hook.config.json`. In Windows release
-/// builds it resolves to `<exe parent>/hook.config.json`.
+/// `~/Library/Application Support/Pouch/hook.conf.toml`. In Windows release
+/// builds it resolves to `<exe parent>/hook.conf.toml`.
 ///
-/// `cwd / hook.config.json` is appended unconditionally as a last-ditch
+/// `cwd / hook.conf.toml` is appended unconditionally as a last-ditch
 /// fallback for users running pouch from a directory that happens to contain
 /// a config file (rare but cheap to support).
 fn candidate_config_paths() -> Vec<PathBuf> {
@@ -252,9 +261,37 @@ fn candidate_config_paths() -> Vec<PathBuf> {
     }
 
     // Fallback: relative to current working directory.
-    out.push(PathBuf::from("hook.config.json"));
+    out.push(PathBuf::from("hook.conf.toml"));
 
     out
+}
+
+/// Best-effort one-line WARN at startup if a legacy `hook.config.json` is
+/// found alongside (or instead of) the new `hook.conf.toml`. We deliberately
+/// do NOT auto-rewrite the file — TOML serialisation would lose any inline
+/// comments the user may have added, and the schema is small enough that
+/// hand-migration is the right call. The user's old JSON is left untouched
+/// so they can copy values across at their own pace.
+fn warn_if_legacy_json_present() {
+    let mut legacy_candidates: Vec<PathBuf> = Vec::new();
+    if let Some(primary) = user_data_path(UserDataKind::Config) {
+        if let Some(parent) = primary.parent() {
+            legacy_candidates.push(parent.join("hook.config.json"));
+        }
+    }
+    legacy_candidates.push(PathBuf::from("hook.config.json"));
+
+    for legacy in legacy_candidates {
+        if legacy.is_file() {
+            warn!(
+                target: "hook",
+                "[config] legacy {} found; the user-config format moved to hook.conf.toml in v1.1.4. \
+                 Please port your settings to hook.conf.toml — the old JSON is no longer read.",
+                pretty_path(&legacy).display()
+            );
+            return; // one warn is enough
+        }
+    }
 }
 
 #[cfg(test)]
@@ -272,8 +309,8 @@ mod tests {
 
     #[test]
     fn config_file_parses_startup_urls() {
-        let parsed: ConfigFile = serde_json::from_str(
-            r#"{"startup_urls": ["https://a.example/", "http://b.example/"]}"#,
+        let parsed: ConfigFile = toml::from_str(
+            r#"startup_urls = ["https://a.example/", "http://b.example/"]"#,
         )
         .unwrap();
         assert_eq!(
@@ -284,13 +321,25 @@ mod tests {
 
     #[test]
     fn config_file_tolerates_missing_startup_urls() {
-        let parsed: ConfigFile = serde_json::from_str("{}").unwrap();
+        let parsed: ConfigFile = toml::from_str("").unwrap();
         assert!(parsed.startup_urls.is_none());
+    }
+
+    /// Helper: TOML can't deserialise a bare scalar at the top level (every
+    /// document is a table), so each test wraps the value in `x = ...` and
+    /// extracts back through a one-shot wrapper struct. Mirrors what
+    /// `serde_json::from_str("\"default\"")` did directly in JSON.
+    fn parse_window_dimensions(value_toml: &str) -> Result<WindowDimensions, toml::de::Error> {
+        #[derive(Deserialize)]
+        struct W {
+            x: WindowDimensions,
+        }
+        toml::from_str::<W>(&format!("x = {value_toml}")).map(|w| w.x)
     }
 
     #[test]
     fn window_dimensions_default_string() {
-        let parsed: WindowDimensions = serde_json::from_str(r#""default""#).unwrap();
+        let parsed = parse_window_dimensions(r#""default""#).unwrap();
         assert!(matches!(
             parsed,
             WindowDimensions::Mode(WindowDimensionsMode::Default)
@@ -299,7 +348,7 @@ mod tests {
 
     #[test]
     fn window_dimensions_inherit_string() {
-        let parsed: WindowDimensions = serde_json::from_str(r#""inherit""#).unwrap();
+        let parsed = parse_window_dimensions(r#""inherit""#).unwrap();
         assert!(matches!(
             parsed,
             WindowDimensions::Mode(WindowDimensionsMode::Inherit)
@@ -308,7 +357,7 @@ mod tests {
 
     #[test]
     fn window_dimensions_maximized_string() {
-        let parsed: WindowDimensions = serde_json::from_str(r#""maximized""#).unwrap();
+        let parsed = parse_window_dimensions(r#""maximized""#).unwrap();
         assert!(matches!(
             parsed,
             WindowDimensions::Mode(WindowDimensionsMode::Maximized)
@@ -317,7 +366,7 @@ mod tests {
 
     #[test]
     fn window_dimensions_fullscreen_string() {
-        let parsed: WindowDimensions = serde_json::from_str(r#""fullscreen""#).unwrap();
+        let parsed = parse_window_dimensions(r#""fullscreen""#).unwrap();
         assert!(matches!(
             parsed,
             WindowDimensions::Mode(WindowDimensionsMode::Fullscreen)
@@ -326,8 +375,7 @@ mod tests {
 
     #[test]
     fn window_dimensions_size_object() {
-        let parsed: WindowDimensions =
-            serde_json::from_str(r#"{"width": 1280, "height": 800}"#).unwrap();
+        let parsed = parse_window_dimensions(r#"{ width = 1280, height = 800 }"#).unwrap();
         match parsed {
             WindowDimensions::Size { width, height } => {
                 assert_eq!(width, 1280);
@@ -341,16 +389,16 @@ mod tests {
     fn window_dimensions_rejects_uppercase_mode() {
         // serde rename_all = "lowercase" + untagged enum: "Maximized" matches
         // no variant, so the whole untagged enum fails to deserialise.
-        assert!(serde_json::from_str::<WindowDimensions>(r#""Maximized""#).is_err());
-        assert!(serde_json::from_str::<WindowDimensions>(r#""FULLSCREEN""#).is_err());
-        assert!(serde_json::from_str::<WindowDimensions>(r#""max""#).is_err());
+        assert!(parse_window_dimensions(r#""Maximized""#).is_err());
+        assert!(parse_window_dimensions(r#""FULLSCREEN""#).is_err());
+        assert!(parse_window_dimensions(r#""max""#).is_err());
         // The legacy v1.0.x value `"screen"` is a hard schema break (no alias).
-        assert!(serde_json::from_str::<WindowDimensions>(r#""screen""#).is_err());
+        assert!(parse_window_dimensions(r#""screen""#).is_err());
     }
 
     #[test]
     fn config_file_window_dimensions_defaults_when_missing() {
-        let parsed: ConfigFile = serde_json::from_str("{}").unwrap();
+        let parsed: ConfigFile = toml::from_str("").unwrap();
         assert!(parsed.window_dimensions.is_none());
         // The resolved Config (via the load() path) defaults to Inherit —
         // we can't easily call load() here because it touches argv/env/fs,
@@ -360,5 +408,32 @@ mod tests {
             WindowDimensions::default(),
             WindowDimensions::Mode(WindowDimensionsMode::Inherit)
         ));
+    }
+
+    #[test]
+    fn config_file_parses_full_toml_sample() {
+        // Exercise the full schema (startup_urls + window_dimensions +
+        // ignore_urls with all four entry shapes) in one shot, mirroring the
+        // shipped `hook.conf.toml` sample. Keeps a single source of truth
+        // for "the user's file shape really does deserialise".
+        let parsed: ConfigFile = toml::from_str(
+            r#"
+            startup_urls = ["https://www.leelib.com"]
+            window_dimensions = "inherit"
+            ignore_urls = [
+                { suffix = "gstatic.com" },
+                { wildcard = "*.google.com" },
+                { url_wildcard = "https://ipecho.io/*" },
+                { url_regex = "^https://example\\.com/track/.*" },
+            ]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(parsed.startup_urls.as_deref().map(|s| s.len()), Some(1));
+        assert!(matches!(
+            parsed.window_dimensions,
+            Some(WindowDimensions::Mode(WindowDimensionsMode::Inherit))
+        ));
+        assert_eq!(parsed.ignore_urls.as_deref().map(|s| s.len()), Some(4));
     }
 }

@@ -1,6 +1,6 @@
 //! Unified cross-session state persistence (`storage.db`, SQLite).
 //!
-//! Where this fits in the user-data layout: a sibling of `hook.config.json`
+//! Where this fits in the user-data layout: a sibling of `hook.conf.toml`
 //! and the `inject/` / `overrides/` directories under the user-data root —
 //!
 //! - dev: `<repo>/storage.db`
@@ -9,7 +9,7 @@
 //!
 //! The path resolver piggy-backs on [`crate::util::user_data_path`] (with
 //! `UserDataKind::Config`) for its **parent directory** — the file we want is
-//! a sibling of `hook.config.json`, not the config itself.
+//! a sibling of `hook.conf.toml`, not the config itself.
 //!
 //! Why a single SQLite KV table (VSCode-style) instead of one JSON file per
 //! kind of state:
@@ -41,7 +41,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::util::{user_data_path, UserDataKind};
 
-/// File name (a sibling of `hook.config.json` under the user-data root).
+/// File name (a sibling of `hook.conf.toml` under the user-data root).
 const STORAGE_FILENAME: &str = "storage.db";
 
 /// KV-table key for the persisted [`WindowState`] blob (JSON-serialised).
@@ -88,7 +88,7 @@ static DB: OnceLock<Mutex<Connection>> = OnceLock::new();
 /// Resolve the on-disk path for `storage.db`. Mirrors the resolver used by
 /// the previous JSON implementation (and by `cache_store` / `config`):
 /// piggy-back on `UserDataKind::Config` to find the parent directory of
-/// `hook.config.json`, then attach our own filename. Falls back to a bare
+/// `hook.conf.toml`, then attach our own filename. Falls back to a bare
 /// relative filename when path resolution fails — every call site in this
 /// module then opens `./storage.db` in the cwd, which is no worse than the
 /// old JSON behaviour and keeps load/save on a non-panicking path.

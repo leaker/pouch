@@ -21,6 +21,11 @@ tauri-build = { version = "2.6.1", features = [] }
 tauri = { version = "2", features = ["devtools", "macos-proxy"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# User-config file format (`hook.conf.toml`). Already in the lockfile via
+# `tauri-build` → `cargo-platform` → `toml`, so promoting it to a direct
+# dep adds no extra compilation; only changes which crate "owns" the edge
+# in the dep graph.
+toml = "0.8"
 tokio = { version = "1", features = ["fs", "sync", "io-util", "macros", "rt-multi-thread"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2", "stream", "gzip", "brotli", "deflate", "cookies"] }
 regex = "1"

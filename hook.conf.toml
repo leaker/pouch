@@ -1,0 +1,116 @@
+# =============================================================================
+# Pouch user configuration
+# =============================================================================
+#
+# This file controls Pouch's startup URLs, the initial window dimensions, and
+# the URL filter that bypasses the on-disk cache.
+#
+# Resolved location depends on the build:
+#   - dev tree (`bun run tauri dev`): <repo>/hook.conf.toml
+#   - macOS release (Pouch.app):     ~/Library/Application Support/Pouch/hook.conf.toml
+#                                    (seeded on first launch from the .app
+#                                     bundle's Contents/Resources/sample/)
+#   - Windows release:               <pouch.exe parent>/hook.conf.toml
+#
+# Reload: edits take effect on the next launch. The titlebar Reload button
+# (Cmd+R) re-reads this file by restarting the application.
+#
+# Failures (file missing / parse error / invalid entries) never abort startup —
+# Pouch logs at WARN and falls through to safe defaults (empty startup_urls
+# triggers an NSAlert prompt on macOS; missing window_dimensions defaults to
+# "inherit"; missing ignore_urls means no filtering).
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# startup_urls: list of URLs to open at launch.
+# -----------------------------------------------------------------------------
+# - The first valid entry becomes the main window (label = "main").
+# - Each subsequent entry becomes its own additional window with shared
+#   cookies / cache and an independent webview lifecycle.
+# - Every entry must be an http(s) URL string; non-http(s) entries are
+#   dropped at load time with a WARN log (the rest of the list is kept).
+# - Missing / null / empty list → on macOS, Pouch pops a native NSAlert
+#   ("Welcome to Pouch") asking the user for a URL; OK opens it as the main
+#   window, Cancel/Escape exits cleanly. On Windows there is no prompt UI:
+#   an empty list is logged at WARN and Pouch refuses to open a window —
+#   populate this field and relaunch.
+startup_urls = ["https://www.leelib.com"]
+
+# -----------------------------------------------------------------------------
+# window_dimensions: initial dimensions applied uniformly to the main window
+# and every additional window.
+# -----------------------------------------------------------------------------
+# Accepted values (VSCode-style naming, mirrors `window.newWindowDimensions`):
+#
+#   "default"    — ordinary floating window at the 1280x960 baseline; not
+#                  maximised, not fullscreen.
+#   "inherit"    — restore position / size / mode from the previous session
+#                  (persisted in storage.db, sibling of this file). Falls
+#                  back to the same 1280x960 geometry as "default" on first
+#                  launch when no state has been recorded yet. Default when
+#                  the field is omitted.
+#   "maximized"  — fill the OS work area (excludes macOS menubar/dock and
+#                  the Windows taskbar).
+#   "fullscreen" — real fullscreen, hides window chrome (title bar, traffic
+#                  lights, taskbar).
+#   { width = <px>, height = <px> }
+#                — fixed logical-pixel inner size (DPR-independent).
+#
+# Validation: unknown strings (e.g. "Maximized", "FULLSCREEN", "max", or the
+# legacy v1.0.x value "screen") fail to parse and the loader falls through
+# to "inherit". Negative / non-integer width or height also fail to parse;
+# zero values are accepted but fall back to "maximized" mode at startup.
+window_dimensions = "inherit"
+
+# -----------------------------------------------------------------------------
+# ignore_urls: per-entry blacklist applied to the original URL after URL
+# resolution. Matched URLs are still fetched (the upstream response is
+# handed to the webview) but the local cache is neither read nor written —
+# i.e. "fetch but do not write". Intent: let implicit browser-emitted
+# telemetry / font / CDN requests pass through without polluting overrides/.
+# -----------------------------------------------------------------------------
+# Each entry has EXACTLY ONE of the following four keys — the field name is
+# the variant tag (no magic prefix strings on the value). Missing field, an
+# empty array, or supplying more than one of the four keys all mean
+# "no filtering" (the latter fails parsing for the whole array; the loader
+# warns and installs an empty rule set).
+#
+#   suffix       — host suffix, APEX INCLUDED. `gstatic.com` matches both
+#                  `gstatic.com` itself and any subdomain like
+#                  `fonts.gstatic.com`. Cheaper than a regex.
+#   wildcard     — host glob; `*` matches a SINGLE label segment and does
+#                  NOT cross `.`. `*.google.com` matches `fonts.google.com`
+#                  but NOT `google.com` (write a separate `suffix` for the
+#                  apex). `ads.*.com` matches `ads.foo.com` but not
+#                  `ads.foo.bar.com`.
+#   url_wildcard — full-URL glob; `*` matches ANY characters (including `/`).
+#                  All other regex meta is escaped. Auto-anchored at both
+#                  ends.
+#   url_regex    — raw `regex::Regex` against the full URL. NOT auto-
+#                  anchored — caller controls `^` / `$`.
+#
+# Host comparisons parse the URL via the `url` crate, so scheme / port /
+# path / userinfo / IPv6 brackets are handled correctly.
+ignore_urls = [
+  # Google static asset CDN (apex + all subdomains)
+  { suffix = "gstatic.com" },
+
+  # GTM / GA injection scripts
+  { suffix = "googletagmanager.com" },
+
+  # GA reporting endpoint
+  { suffix = "google-analytics.com" },
+
+  # Public npm CDN
+  { suffix = "cdn.jsdelivr.net" },
+
+  # Example: matches google.com subdomains only (e.g. fonts.google.com /
+  # mail.google.com), apex excluded
+  { wildcard = "*.google.com" },
+
+  # Example: URL glob, * matches any characters
+  { url_wildcard = "https://ipecho.io/*" },
+
+  # Example: full-URL regex, caller controls anchors
+  { url_regex = '^https:\/\/www\.leelib\.com(?:\/.*)?\/[^\/]+\.html$' },
+]

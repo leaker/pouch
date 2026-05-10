@@ -2,7 +2,7 @@
 //! `url_resolver::resolve`. Matched URLs bypass the cache and stream straight
 //! through `http_fetcher`.
 //!
-//! Rules are loaded from `hook.config.json`'s `ignore_urls` field via
+//! Rules are loaded from `hook.conf.toml`'s `ignore_urls` field via
 //! [`set_matchers`]; this module ships **no** built-in defaults. If the field
 //! is missing, empty, or [`set_matchers`] is never called, [`is_ignored`]
 //! simply returns `false` for every URL.
@@ -34,7 +34,7 @@ use regex::Regex;
 use serde::Deserialize;
 use tracing::warn;
 
-/// On-disk schema for a single entry in `hook.config.json`'s `ignore_urls`
+/// On-disk schema for a single entry in `hook.conf.toml`'s `ignore_urls`
 /// array. Untagged: the present field name selects the variant. Each variant
 /// uses `deny_unknown_fields` so an entry that mixes variant keys (e.g.
 /// `{ "suffix": "...", "wildcard": "..." }`) fails to match any single variant
@@ -48,7 +48,7 @@ pub enum IgnoreEntry {
     Suffix {
         suffix: String,
         #[serde(default)]
-        #[allow(dead_code)] // schema-only field; documents intent in the JSON file
+        #[allow(dead_code)] // schema-only legacy field (TOML uses `#` comments instead)
         comment: Option<String>,
     },
     /// Host glob; `*` matches a single label segment and does **not** cross `.`.

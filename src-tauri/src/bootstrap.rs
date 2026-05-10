@@ -2,7 +2,7 @@
 //!
 //! When the user double-clicks `Pouch.app` for the first time, the per-user
 //! data root at `~/Library/Application Support/Pouch/` does not yet exist —
-//! the .app bundle is read-only and ships a sample copy of `hook.config.json`
+//! the .app bundle is read-only and ships a sample copy of `hook.conf.toml`
 //! and `inject/*.js` inside `Contents/Resources/sample/` (configured via the
 //! `bundle.resources` map in `tauri.conf.json`).
 //!
@@ -20,7 +20,7 @@
 //! behaviour we already use for power-loss / disk-full corner cases.
 //!
 //! This module is **macOS-only**. Windows release builds use a "portable"
-//! layout with `hook.config.json` + `inject/` next to the binary, and dev
+//! layout with `hook.conf.toml` + `inject/` next to the binary, and dev
 //! builds (`debug_assertions`) read straight from the repo root — neither
 //! needs bootstrapping.
 
@@ -46,14 +46,14 @@ mod macos {
     use crate::util::{macos_app_support_dir, pretty_path};
 
     /// Sub-directory inside `$RESOURCE` (i.e. `Pouch.app/Contents/Resources/`)
-    /// that holds the shipped defaults for `hook.config.json` and `inject/`.
+    /// that holds the shipped defaults for `hook.conf.toml` and `inject/`.
     /// Must match the destination paths in `tauri.conf.json` →
     /// `bundle.resources`.
     const SAMPLE_DIR: &str = "sample";
 
     /// Seed the bundled `sample/` tree into
     /// `~/Library/Application Support/Pouch/` with **file-level**
-    /// idempotency: each shipped artifact (`hook.config.json`, `inject/`)
+    /// idempotency: each shipped artifact (`hook.conf.toml`, `inject/`)
     /// is copied only when its destination is missing. Existing user files
     /// are never overwritten; deleted files are restored on next launch.
     ///
@@ -113,11 +113,15 @@ mod macos {
             return;
         }
 
-        // 1. hook.config.json — copy only when the destination is missing.
+        // 1. hook.conf.toml — copy only when the destination is missing.
         //    If the user has edited or kept this file we leave it alone.
-        let dst_config = user_dir.join("hook.config.json");
+        //    Note: a stale `hook.config.json` from a pre-v1.1.4 install may
+        //    coexist in the same directory; we deliberately do NOT delete or
+        //    rewrite it (config.rs surfaces a one-line WARN pointing the user
+        //    at the new filename).
+        let dst_config = user_dir.join("hook.conf.toml");
         if !dst_config.exists() {
-            let src_config = sample_root.join("hook.config.json");
+            let src_config = sample_root.join("hook.conf.toml");
             if src_config.is_file() {
                 match fs::copy(&src_config, &dst_config) {
                     Ok(_) => info!(
@@ -136,7 +140,7 @@ mod macos {
             } else {
                 warn!(
                     target: "hook",
-                    "[bootstrap] sample hook.config.json not found at {}",
+                    "[bootstrap] sample hook.conf.toml not found at {}",
                     pretty_path(&src_config).display()
                 );
             }
@@ -210,13 +214,13 @@ mod macos {
             let src = tempdir().expect("src tempdir");
             let dst = tempdir().expect("dst tempdir");
             fs::create_dir_all(src.path().join("inject")).unwrap();
-            fs::write(src.path().join("hook.config.json"), b"{}").unwrap();
+            fs::write(src.path().join("hook.conf.toml"), b"").unwrap();
             fs::write(src.path().join("inject/global.js"), b"// global").unwrap();
             fs::write(src.path().join("inject/leelib.js"), b"// leelib").unwrap();
 
             let n = copy_dir_recursive(src.path(), &dst.path().join("out")).unwrap();
             assert_eq!(n, 3, "expected three files copied");
-            assert!(dst.path().join("out/hook.config.json").is_file());
+            assert!(dst.path().join("out/hook.conf.toml").is_file());
             assert!(dst.path().join("out/inject/global.js").is_file());
             assert!(dst.path().join("out/inject/leelib.js").is_file());
         }

@@ -9,7 +9,7 @@
 //! scope.
 //!
 //! Design decisions (locked — do not relitigate here):
-//! - Rules live as files in `inject/`, not in `hook.config.json`.
+//! - Rules live as files in `inject/`, not in `hook.conf.toml`.
 //! - `@match` is glob (`*` matches anything) or `regex:<pattern>` prefix.
 //! - Missing `@match` ⇒ skip the file with a warning (no implicit "match all").
 //! - Empty / missing `inject/` ⇒ caller short-circuits and never installs an

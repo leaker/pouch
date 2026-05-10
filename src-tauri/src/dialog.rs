@@ -119,7 +119,7 @@ pub fn cache_window_dimensions(window_dimensions: WindowDimensions) {
 /// the default 1280x960 geometry) if `cache_window_dimensions` was never
 /// called — defensive against a future refactor that drops the setup-time
 /// cache call; the fallback matches what the JSON loader picks for a missing
-/// `window_dimensions` field in `hook.config.json`.
+/// `window_dimensions` field in `hook.conf.toml`.
 fn current_window_dimensions() -> WindowDimensions {
     CACHED_WINDOW_DIMENSIONS.with(|c| c.get().copied().unwrap_or_default())
 }
@@ -311,7 +311,7 @@ fn prompt_url_via_alert(title: &str, info: &str) -> Option<String> {
 ///
 /// `window_dimensions` carries the same `WindowDimensions` the main window
 /// uses so extra windows (whether spawned from the startup `startup_urls`
-/// tail or via Cmd+N) honour `hook.config.json -> window_dimensions`
+/// tail or via Cmd+N) honour `hook.conf.toml -> window_dimensions`
 /// (Default / Maximized / Fullscreen / Size) identically to the main window
 /// — the maximize / fullscreen / fixed-size match below mirrors
 /// `create_main_window_with_url` in `lib.rs` exactly.

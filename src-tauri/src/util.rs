@@ -9,12 +9,12 @@
 //!   scanning startup output.
 //!
 //! - [`user_data_dir`] / [`UserDataKind`] — three-tier path resolver for the
-//!   user-visible `hook.config.json`, `inject/`, and `overrides/` data.
+//!   user-visible `hook.conf.toml`, `inject/`, and `overrides/` data.
 //!   The resolution rules are documented on each function.
 //!
 //! Why "lexical" and not [`std::fs::canonicalize`]:
 //! - We log paths *before* I/O — sometimes for files that don't exist (e.g.
-//!   non-resolved `hook.config.json` candidates).
+//!   non-resolved `hook.conf.toml` candidates).
 //! - We don't want symlinks resolved: the user-visible `inject/` directory
 //!   stays exactly as the user named it on disk.
 //! - Lexical normalisation never touches the filesystem and never fails.
@@ -22,7 +22,7 @@
 use std::path::{Component, Path, PathBuf};
 
 /// Default window inner size used when the user has not pinned an explicit
-/// `{ width, height }` in `hook.config.json`.
+/// `{ width, height }` in `hook.conf.toml`.
 ///
 /// Used by `Default` / `Maximized` / `Fullscreen` / fallback branches in
 /// `lib.rs::setup` and `dialog::open_extra_window` (each entry of
@@ -46,20 +46,20 @@ pub enum UserDataKind {
     Inject,
     /// `overrides/` directory used as the cache root.
     Overrides,
-    /// `hook.config.json` (a file, not a directory — see
+    /// `hook.conf.toml` (a file, not a directory — see
     /// [`user_data_path`]).
     Config,
 }
 
 impl UserDataKind {
     /// Filesystem name relative to the parent dev/prod root. Returns
-    /// `"hook.config.json"` for [`UserDataKind::Config`] and the
+    /// `"hook.conf.toml"` for [`UserDataKind::Config`] and the
     /// directory name for the other two variants.
     pub fn name(self) -> &'static str {
         match self {
             UserDataKind::Inject => "inject",
             UserDataKind::Overrides => "overrides",
-            UserDataKind::Config => "hook.config.json",
+            UserDataKind::Config => "hook.conf.toml",
         }
     }
 }
@@ -93,7 +93,7 @@ pub fn macos_app_support_dir() -> Option<PathBuf> {
 /// helper so the behaviour stays in sync. We `open <dir>` rather than
 /// `open -R <file>` because the user wants to land *inside* the folder
 /// (so they can immediately drop in / inspect `inject/`, `overrides/`,
-/// `hook.config.json`), not "show the folder selected in its parent".
+/// `hook.conf.toml`), not "show the folder selected in its parent".
 ///
 /// Creates the directory first if it doesn't exist yet (e.g. first launch
 /// where `bootstrap_macos_user_dir` somehow hasn't populated it) — Finder
@@ -130,7 +130,7 @@ pub fn reveal_pouch_folder() -> std::io::Result<()> {
 /// Callers that care use `Path::is_dir()` / `Path::exists()` themselves.
 ///
 /// `kind` selects the leaf name (`"inject"`, `"overrides"`, or
-/// `"hook.config.json"`); the resolution rules are otherwise identical
+/// `"hook.conf.toml"`); the resolution rules are otherwise identical
 /// across all three.
 pub fn user_data_path(kind: UserDataKind) -> Option<PathBuf> {
     if cfg!(debug_assertions) {
@@ -311,7 +311,7 @@ mod tests {
     fn user_data_kind_name_matches_slot() {
         assert_eq!(UserDataKind::Inject.name(), "inject");
         assert_eq!(UserDataKind::Overrides.name(), "overrides");
-        assert_eq!(UserDataKind::Config.name(), "hook.config.json");
+        assert_eq!(UserDataKind::Config.name(), "hook.conf.toml");
     }
 
     #[cfg(debug_assertions)]
@@ -325,7 +325,7 @@ mod tests {
         for (kind, name) in [
             (UserDataKind::Inject, "inject"),
             (UserDataKind::Overrides, "overrides"),
-            (UserDataKind::Config, "hook.config.json"),
+            (UserDataKind::Config, "hook.conf.toml"),
         ] {
             let got = user_data_path(kind).expect("dev path is always Some");
             assert_eq!(got, manifest_dir.join("..").join(name));

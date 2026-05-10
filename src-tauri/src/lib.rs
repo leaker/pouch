@@ -1,7 +1,7 @@
 //! Pouch — library entry point.
 //!
 //! Wires up the v2 native interception path:
-//! - Loads `hook.config.json` (via [`config::load`]) into a [`config::Config`]
+//! - Loads `hook.conf.toml` (via [`config::load`]) into a [`config::Config`]
 //!   captured by `move` into the `setup` closure. There is no front-end and
 //!   no IPC, so the config never needs to live in Tauri's state map.
 //! - Calls [`hook::platform::install_global`] *before* building the webview so
@@ -90,7 +90,7 @@ const MENU_ID_REVEAL_FOLDER: &str = "pouch.reveal_folder";
 /// Menu item id for the macOS-only "Reload from Config" entry (Cmd+R).
 /// Paired with the `arrow.clockwise` titlebar button — both call
 /// [`reload_from_config`], which restarts the application via
-/// [`AppHandle::restart`] so changes to `hook.config.json` and `inject/*.js`
+/// [`AppHandle::restart`] so changes to `hook.conf.toml` and `inject/*.js`
 /// take effect on the fresh launch. macOS-only because the paired titlebar
 /// button is macOS-only; on Windows there's no analogous accessory and the
 /// keep-it-uniform argument from the reveal entry applies here too.
@@ -293,7 +293,7 @@ pub fn run() {
                 }
             }
             // Reload menu / titlebar button: restart the application so
-            // changes to hook.config.json and inject/*.js take effect on
+            // changes to hook.conf.toml and inject/*.js take effect on
             // the fresh launch — see `reload_from_config` doc / README §2.5.
             #[cfg(target_os = "macos")]
             if event.id() == MENU_ID_RELOAD {
@@ -311,7 +311,7 @@ pub fn run() {
             // 0. First-run bootstrap: on macOS prod the user-data
             //    directory at `~/Library/Application Support/Pouch/`
             //    doesn't exist yet on first launch. Copy the bundled
-            //    sample (hook.config.json + inject/) out of
+            //    sample (hook.conf.toml + inject/) out of
             //    `Pouch.app/Contents/Resources/sample/` so the resolver
             //    chain in step 2 / `config::load` finds defaults to read.
             //    No-op on dev / Windows.
@@ -405,7 +405,7 @@ pub fn run() {
                         tracing::warn!(
                             target: "hook",
                             "[startup] startup_urls is empty and NSAlert prompt is macOS-only; \
-                             populate hook.config.json -> startup_urls to launch on non-macOS."
+                             populate hook.conf.toml -> startup_urls to launch on non-macOS."
                         );
                         None::<String>
                     }
@@ -626,7 +626,7 @@ fn create_main_window_with_url(
 
     // Apply the user-configured window dimensions. We always set
     // `fullscreen` and `maximized` explicitly (defaulting to false)
-    // so mode switches in `hook.config.json` are deterministic
+    // so mode switches in `hook.conf.toml` are deterministic
     // across launches — never depending on a previous build's
     // leftover state.
     //
@@ -886,7 +886,7 @@ fn capture_window_state(window: &WebviewWindow) -> tauri::Result<WindowState> {
     })
 }
 
-/// Reload by restarting the application. `hook.config.json` and
+/// Reload by restarting the application. `hook.conf.toml` and
 /// `inject/*.js` are re-read on the fresh launch, so any user edits take
 /// effect predictably without ad-hoc in-process state-swapping. Visually
 /// presents as a brief flicker, comparable to a webview rebuild but with
