@@ -112,5 +112,5 @@ ignore_urls = [
   { url_wildcard = "https://ipecho.io/*" },
 
   # Example: full-URL regex, caller controls anchors
-  { url_regex = '^https:\/\/www\.leelib\.com(?:\/.*)?\/[^\/]+\.html$' },
+  { url_regex = '^https:\/\/www\.leelib\.com(?:\/[^\/\.]+)*\/?$' },
 ]
