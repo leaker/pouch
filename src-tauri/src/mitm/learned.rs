@@ -346,12 +346,12 @@ where
     fn on_event(&self, event: &tracing::Event<'_>, ctx: Context<'_, S>) {
         let metadata = event.metadata();
 
-        // 防止 LearnerLayer 自己 emit 的诊断 log（target=hook）再绕回这里。
+        // Prevent diagnostic logs emitted by LearnerLayer itself (target=hook) from looping back in here.
         if metadata.target() == "hook" {
             return;
         }
 
-        // 诊断：确认 hudsucker ERROR event 真的被 dispatch 进来。
+        // Diagnostic: confirm that hudsucker ERROR events are actually being dispatched in here.
         if metadata.target().starts_with("hudsucker")
             && metadata.level() == &tracing::Level::ERROR
         {

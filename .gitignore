@@ -49,6 +49,8 @@ storage.db-shm
 
 # Claude Code per-project state (harness scheduled tasks lock, etc.)
 .claude/
+CLAUDE.md
+AGENTS.md
 
 # Internal planning docs and scratch test dir (kept locally, not tracked;
 # historical content remains in git history before this commit)

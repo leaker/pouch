@@ -547,20 +547,20 @@ pub fn run() {
             static EXITING: AtomicBool = AtomicBool::new(false);
 
             app.run(|_app_handle, event| {
-                // skip MainEventsCleared 这种每帧都 fire 的 noise event，否则 trace log 被淹没
+                // skip MainEventsCleared — a noise event that fires every frame, otherwise the trace log gets drowned
                 match &event {
                     tauri::RunEvent::MainEventsCleared => {}
                     _ => tracing::trace!(target: "hook", "[runevent] {:?}", event),
                 }
                 if let tauri::RunEvent::ExitRequested { code, .. } = event {
-                    // Tauri 在所有 window 关闭后发出 ExitRequested（macOS 不自动退）。
-                    // mitm-tokio (macOS) 与 hook-tokio (Windows) runtime 都是
-                    // OnceLock 永不 drop，无法 graceful shutdown，必须强杀。
-                    // 直接 std::process::exit 绕开 Tauri 派发，避免
-                    // AppHandle::exit 内部 re-emit ExitRequested 形成无限递归
+                    // Tauri emits ExitRequested once all windows are closed (macOS does not auto-quit).
+                    // The mitm-tokio (macOS) and hook-tokio (Windows) runtimes are both
+                    // OnceLock — they never drop, cannot graceful-shutdown, and must be hard-killed.
+                    // Calling std::process::exit directly bypasses Tauri's dispatch to avoid
+                    // AppHandle::exit internally re-emitting ExitRequested into an infinite recursion
                     // (RuntimeRunEvent::ExitRequested -> RunEvent::ExitRequested -> callback
-                    //  -> AppHandle::exit -> RuntimeRunEvent::ExitRequested ... 22 次实证)。
-                    // EXITING swap 是 defensive：万一 callback 被并发派发也只走一次。
+                    //  -> AppHandle::exit -> RuntimeRunEvent::ExitRequested ... 22 reproductions).
+                    // The EXITING swap is defensive: even if the callback is dispatched concurrently it only runs once.
                     if !EXITING.swap(true, Ordering::SeqCst) {
                         std::process::exit(code.unwrap_or(0));
                     }
@@ -1031,8 +1031,8 @@ fn init_tracing() {
         .with_filter(env_filter);
 
     let registry = tracing_subscriber::registry().with(fmt_layer);
-    // LearnerLayer 自己 on_event 内做 target+level 过滤；外层 with_filter
-    // (Targets) 实测会导致 on_event 完全收不到 event，故不再包裹。
+    // LearnerLayer does its own target+level filtering inside on_event; an outer with_filter
+    // (Targets) was empirically shown to cause on_event to receive no events at all, so it is no longer wrapped.
     #[cfg(target_os = "macos")]
     let registry = registry.with(crate::mitm::LearnerLayer);
     let _ = registry.try_init();
