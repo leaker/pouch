@@ -13,7 +13,7 @@ The metaphor: like a hamster stuffing food into its cheek pouch, Pouch quietly s
 
 Pouch targets two related needs: "offline-first" desktop wrappers and "local resource override" patches (for example, swapping in a patched copy of a JS file served from a CDN). It uses **platform-native network-stack interception** — every subresource request the webview engine emits while parsing HTML first goes through Rust, which then decides whether to serve a local file or hit the upstream.
 
-The whole flow is **completely transparent** to the frontend: the user lists their target URL(s) in `hook.config.json -> startup_urls`, and on launch the app builds the main webview programmatically with `WebviewUrl::External(<first entry>)` — **no intermediate trampoline page, no IPC bridge**. The origin the webview sees on every request and response is the real `https://www.leelib.com`, so cookies, CSP, SRI, and same-origin policy all behave exactly as on the live site, with zero frontend rewriting. When you do need to inject business scripts into the target page, a separate Tampermonkey-style `inject/*.js` channel is provided — see §6.
+The whole flow is **completely transparent** to the frontend: the user lists their target URL(s) in `hook.conf.toml -> startup_urls`, and on launch the app builds the main webview programmatically with `WebviewUrl::External(<first entry>)` — **no intermediate trampoline page, no IPC bridge**. The origin the webview sees on every request and response is the real `https://www.leelib.com`, so cookies, CSP, SRI, and same-origin policy all behave exactly as on the live site, with zero frontend rewriting. When you do need to inject business scripts into the target page, a separate Tampermonkey-style `inject/*.js` channel is provided — see §6.
 
 How Pouch compares to a CDP-based interception approach (e.g. an Electron app driving `Fetch.requestPaused`):
 
@@ -34,60 +34,66 @@ In short: Pouch delivers equivalent capability with a smaller binary plus the sy
 ### 2.1 Prerequisites
 
 - **Rust toolchain** (rustc 1.77.2+): see [rust-lang.org/install](https://www.rust-lang.org/tools/install)
-- **Bun** (recommended) or Node.js + npm/pnpm: see [bun.sh](https://bun.sh)
+- **Tauri CLI**: `cargo install tauri-cli --version "^2"` (only needed for `cargo dev` / `cargo bundle`; the `cargo start` / `cargo build-app` aliases below also rely on it for the latter)
 - **Tauri platform dependencies** (macOS needs Xcode CLT; Windows needs the WebView2 Runtime + MSVC toolchain): full list at [v2.tauri.app/start/prerequisites](https://v2.tauri.app/start/prerequisites/)
 - **macOS 11+** (Apple Silicon and Intel both work) or **Windows 10 1809+ / Windows 11**
 
 ### 2.2 Configure the target URL
 
-Edit `hook.config.json` — its location depends on whether you are running a dev tree or a packaged release build (full resolution chain in §4.2):
+Edit `hook.conf.toml` — its location depends on whether you are running a dev tree or a packaged release build (full resolution chain in §4.2):
 
 | Build | Path |
 |---|---|
-| **dev tree** (`bun run tauri dev`, running from a clone) | `<repo>/hook.config.json` |
-| **macOS release** (`Pouch.app` from the .dmg) | `~/Library/Application Support/Pouch/hook.config.json` |
+| **dev tree** (`cargo dev`, running from a clone) | `<repo>/hook.conf.toml` |
+| **macOS release** (`Pouch.app` from the .dmg) | `~/Library/Application Support/Pouch/hook.conf.toml` |
 | **Windows release** (portable `.exe` / `.zip`) | next to `pouch.exe` |
 
-```json
-{
-  "startup_urls": ["https://www.leelib.com"]
-}
+```toml
+startup_urls = ["https://www.leelib.com"]
 ```
 
-`startup_urls` is an array — the first entry becomes the main window and any additional entries open as extra windows on launch (see §2.6). Setting a single-element array is the **default and recommended** way to configure Pouch. If `startup_urls` is missing, `null`, `[]`, or every entry was non-http(s), Pouch prompts the user with a native NSAlert at startup so the launch can still proceed; **Cancel exits the process** (Escape is equivalent). See §4.1 for the full schema.
+`startup_urls` is an array — the first entry becomes the main window and any additional entries open as extra windows on launch (see §2.6). Setting a single-element array is the **default and recommended** way to configure Pouch. If `startup_urls` is missing or `[]`, or every entry was non-http(s), Pouch prompts the user with a native NSAlert at startup so the launch can still proceed; **Cancel exits the process** (Escape is equivalent). See §4.1 for the full schema.
 
-> **macOS first launch**: when you double-click `Pouch.app` for the first time, the directory `~/Library/Application Support/Pouch/` does not yet exist. Pouch detects this and seeds it with a copy of the sample `hook.config.json` and the explicit sample `inject/*.js` files shipped inside the .app bundle (`Contents/Resources/sample/`). The bundled sample list is enumerated explicitly in `src-tauri/tauri.conf.json` `bundle.resources` rather than mapped from the whole `inject/` directory, so any debug / scratch `.js` files you keep in the dev-tree `inject/` will **not** sneak into the .app — adding a new sample requires updating that map. Edit the seeded files freely afterwards — Pouch only seeds the directory on first launch and never overwrites your edits. To reset, delete the directory and relaunch.
+> **macOS first launch**: when you double-click `Pouch.app` for the first time, the directory `~/Library/Application Support/Pouch/` does not yet exist. Pouch detects this and seeds it with a copy of the sample `hook.conf.toml` and the explicit sample `inject/*.js` files shipped inside the .app bundle (`Contents/Resources/sample/`). The bundled sample list is enumerated explicitly in `src-tauri/tauri.conf.json` `bundle.resources` rather than mapped from the whole `inject/` directory, so any debug / scratch `.js` files you keep in the dev-tree `inject/` will **not** sneak into the .app — adding a new sample requires updating that map. Edit the seeded files freely afterwards — Pouch only seeds the directory on first launch and never overwrites your edits. To reset, delete the directory and relaunch.
 
 ### 2.3 Install and launch
 
 ```bash
 git clone <repo>
 cd pouch
-bun install        # or npm install / pnpm install
 
 # dev mode (hot reload, stdout logs)
-bun run tauri dev
+cargo dev
 
 # release build — executable only (no installer); fastest path, runs the same on macOS and Windows
-bun run build
+cargo build-app
 # artifact: src-tauri/target/release/pouch (Windows: pouch.exe)
 
 # launch the release build; cargo's incremental compilation skips rebuild when sources are unchanged.
 # cwd stays at the repo root so inject/ and overrides/ resolve correctly. Same command on macOS and Windows.
-bun run start
+cargo start
 
 # full release build with platform installer (.dmg / .msi / .nsis / ...) — rarely needed locally;
 # CI (tauri-action on GitHub Actions) produces the macOS installer
-bun run tauri build
+cargo bundle
 # artifacts in src-tauri/target/release/bundle/
 ```
 
-`bun install` only installs a single dev dependency: `@tauri-apps/cli`. Pouch **has no frontend runtime** — the main window is built programmatically in Rust and navigates directly to the first `startup_urls` entry, with no HTML trampoline page, no IPC, and no npm runtime dependencies.
+### Common commands
+
+`cargo start` — run release build directly (no bundling, fastest iteration).
+`cargo build-app` — compile signed binary into `src-tauri/target/release/` without bundling.
+`cargo dev` — hot-reload development mode.
+`cargo bundle` — full bundle (.app + .dmg on macOS, .msi on Windows).
+
+These come from `.cargo/config.toml` aliases — run `cargo --list` to see all.
+
+Pouch **has no frontend runtime** and no npm dependencies — the main window is built programmatically in Rust and navigates directly to the first `startup_urls` entry, with no HTML trampoline page and no IPC.
 
 After launch the window opens directly on that URL, and every subresource request flows through the local interception layer. The terminal shows the full startup log:
 
 ```
-INFO hook: [config] /path/to/hook.config.json startup_urls = 1 entrie(s)
+INFO hook: [config] /path/to/hook.conf.toml startup_urls = 1 entrie(s)
 INFO hook: [startup] startup_urls = 1 entrie(s)
 INFO hook: [startup] cache root = /path/to/overrides
 DEBUG hook: [hook][mac] registerClass -> ok
@@ -99,7 +105,7 @@ INFO hook: [hook][mac] NSURLProtocol installed; https/http routed through HookUR
 
 ```bash
 # Tweak log level (to follow the HIT/MISS pipeline)
-TAURI_HOOK_LOG=hook=debug bun run tauri dev
+TAURI_HOOK_LOG=hook=debug cargo dev
 ```
 
 ### 2.5 Open DevTools
@@ -112,14 +118,14 @@ On macOS the right side of the titlebar carries three SF Symbol buttons mirrorin
 
 The DevTools button doubles as a state indicator: it shows the outlined `wrench.and.screwdriver` glyph while the inspector is closed and swaps to the filled `wrench.and.screwdriver.fill` glyph while it is open. All three triggers (the titlebar button, F12, and the `View → Open DevTools` menu item) keep the icon in sync — pressing F12 or clicking the menu item flips the icon along with the inspector's visibility.
 
-> **Reload behaviour**: The Reload button (Cmd+R) restarts the application to apply changes to `hook.config.json` and `inject/*.js`. This is implemented as a clean process restart (`app.restart()`) for predictable behavior.
+> **Reload behaviour**: The Reload button (Cmd+R) restarts the application to apply changes to `hook.conf.toml` and `inject/*.js`. This is implemented as a clean process restart (`app.restart()`) for predictable behavior.
 
 ### 2.6 Multiple windows (macOS)
 
 Pouch runs as a single process and supports multiple `WebviewWindow`s sharing the same WebKit data store, so cookies, `localStorage`, and the disk cache are shared across windows. There are two ways to open extra windows:
 
-1. **`startup_urls` array in `hook.config.json`** — the first entry becomes the main window; every subsequent entry is opened as its own additional window when Pouch launches. See §4.1 for the schema.
-2. **`File → New Window` (`Cmd+N`)** — pops a native `NSAlert` (titled with a `globe` SF Symbol icon) whose accessory view is a wide `NSComboBox`: type a URL or pick from the dropdown of recently-used destinations. Pressing Return (or clicking *Open*) opens that URL as an additional window. Escape / Cancel / non-http(s) input is a quiet no-op. Recent URLs are persisted across launches in `storage.db` (the `recent_urls` row, see §5.5) next to `hook.config.json`, and the field starts empty so a fresh paste is unobstructed.
+1. **`startup_urls` array in `hook.conf.toml`** — the first entry becomes the main window; every subsequent entry is opened as its own additional window when Pouch launches. See §4.1 for the schema.
+2. **`File → New Window` (`Cmd+N`)** — pops a native `NSAlert` (titled with a `globe` SF Symbol icon) whose accessory view is a wide `NSComboBox`: type a URL or pick from the dropdown of recently-used destinations. Pressing Return (or clicking *Open*) opens that URL as an additional window. Escape / Cancel / non-http(s) input is a quiet no-op. Recent URLs are persisted across launches in `storage.db` (the `recent_urls` row, see §5.5) next to `hook.conf.toml`, and the field starts empty so a fresh paste is unobstructed.
 
 Each window gets its own titlebar accessory (Reveal / Reload / Toggle DevTools). The DevTools button is per-window — clicking the button or pressing F12 toggles DevTools on the focused window only — while the Reveal Folder button is process-global and the Reload button still restarts the whole application (so all windows close and reopen with the freshly-read config).
 
@@ -262,58 +268,65 @@ Changes to the webview's `document.title` (including SPA route changes where the
 
 ## 4. Configuration
 
-### 4.1 `hook.config.json`
+### 4.1 `hook.conf.toml`
 
 Resolved location depends on the build (see §2.2 for the table):
 
-- **dev**: `<repo>/hook.config.json`
-- **macOS release**: `~/Library/Application Support/Pouch/hook.config.json` (seeded on first launch from the .app bundle's `Contents/Resources/sample/`)
+- **dev**: `<repo>/hook.conf.toml`
+- **macOS release**: `~/Library/Application Support/Pouch/hook.conf.toml` (seeded on first launch from the .app bundle's `Contents/Resources/sample/`)
 - **Windows release**: next to `pouch.exe`
 
-The shipped [`hook.config.json`](hook.config.json) sets `startup_urls` plus a starter `ignore_urls` list demonstrating all four entry shapes (see §4.3 for the full schema):
+The shipped [`hook.conf.toml`](hook.conf.toml) sets `startup_urls` plus a starter `ignore_urls` list demonstrating all four entry shapes (see §4.3 for the full schema). Inline `#` comments are preserved in the user's copy:
 
-```json
-{
-  "startup_urls": [
-    "https://www.leelib.com"
-  ],
-  "window_dimensions": "inherit",
-  "ignore_urls": [
-    { "suffix": "gstatic.com",          "comment": "Google static asset CDN (apex + all subdomains)" },
-    { "suffix": "googletagmanager.com", "comment": "GTM / GA injection scripts" },
-    { "suffix": "google-analytics.com", "comment": "GA reporting endpoint" },
-    { "suffix": "cdn.jsdelivr.net",     "comment": "Public npm CDN" },
-    { "wildcard": "*.google.com",       "comment": "Example: matches google.com subdomains only (e.g. fonts.google.com / mail.google.com), apex excluded" },
-    { "url_wildcard": "https://ipecho.io/*", "comment": "Example: URL glob, * matches any characters" },
-    { "url_regex": "^https://example\\.com/track/.*", "comment": "Example: full-URL regex, caller controls anchors" }
-  ]
-}
+```toml
+startup_urls = ["https://www.leelib.com"]
+
+window_dimensions = "inherit"
+
+ignore_urls = [
+  # Google static asset CDN (apex + all subdomains)
+  { suffix = "gstatic.com" },
+  # GTM / GA injection scripts
+  { suffix = "googletagmanager.com" },
+  # GA reporting endpoint
+  { suffix = "google-analytics.com" },
+  # Public npm CDN
+  { suffix = "cdn.jsdelivr.net" },
+  # Example: matches google.com subdomains only, apex excluded
+  { wildcard = "*.google.com" },
+  # Example: URL glob, * matches any characters
+  { url_wildcard = "https://ipecho.io/*" },
+  # Example: full-URL regex, caller controls anchors
+  { url_regex = "^https://example\\.com/track/.*" },
+]
 ```
 
 Fields:
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `startup_urls` | array of strings (each `http://` or `https://`) | No (missing/`null`/`[]` = prompt the user via NSAlert at startup; Cancel exits — see §2.6 / §4.2) | URLs to open at launch. The first valid entry becomes the main `WebviewWindow` (`label = "main"`, `WebviewUrl::External(url)`); every subsequent entry opens as its own extra window with shared cookies / cache and an independent webview lifecycle. Non-http(s) entries are dropped with a `warn` log. See §2.6. |
-| `window_dimensions` | `"default"` \| `"inherit"` \| `"maximized"` \| `"fullscreen"` \| `{ "width": <px>, "height": <px> }` | No (default `"inherit"`; first-launch fallback to default 1280×960) | Initial window dimensions applied at launch (uniformly to the main window and every extra window). VSCode-style naming. `"inherit"` restores from `storage.db` — see §5.5. See §4.4. |
-| `ignore_urls` | array of entries (one of `suffix` / `wildcard` / `url_wildcard` / `url_regex`, plus optional `comment`) | No (missing/`null`/`[]` = no filtering) | Per-entry blacklist; matched URLs are fetched but never cached. See §4.3 for the four entry shapes. |
+| `startup_urls` | array of strings (each `http://` or `https://`) | No (missing/`[]` = prompt the user via NSAlert at startup; Cancel exits — see §2.6 / §4.2) | URLs to open at launch. The first valid entry becomes the main `WebviewWindow` (`label = "main"`, `WebviewUrl::External(url)`); every subsequent entry opens as its own extra window with shared cookies / cache and an independent webview lifecycle. Non-http(s) entries are dropped with a `warn` log. See §2.6. |
+| `window_dimensions` | `"default"` \| `"inherit"` \| `"maximized"` \| `"fullscreen"` \| `{ width = <px>, height = <px> }` | No (default `"inherit"`; first-launch fallback to default 1280×960) | Initial window dimensions applied at launch (uniformly to the main window and every extra window). VSCode-style naming. `"inherit"` restores from `storage.db` — see §5.5. See §4.4. |
+| `ignore_urls` | array of inline tables (one of `suffix` / `wildcard` / `url_wildcard` / `url_regex`) | No (missing/`[]` = no filtering) | Per-entry blacklist; matched URLs are fetched but never cached. See §4.3 for the four entry shapes. |
 
-> **Schema break in v1.1**: the previous fields `target_url` (single string) and `windows` (array) have been **unified into the single `startup_urls` array**. There is no deprecation alias — users upgrading from v1.0.x must edit `hook.config.json` by hand. The `TAURI_HOOK_TARGET_URL` environment variable and the `argv[1]` URL override have also been removed in the same change (everything goes through `startup_urls` now).
+> **Schema break in v1.1**: the previous fields `target_url` (single string) and `windows` (array) have been **unified into the single `startup_urls` array**. There is no deprecation alias — users upgrading from v1.0.x must edit `hook.conf.toml` by hand. The `TAURI_HOOK_TARGET_URL` environment variable and the `argv[1]` URL override have also been removed in the same change (everything goes through `startup_urls` now).
+>
+> **Format break in v1.1.4**: the user-config file moved from `hook.config.json` to `hook.conf.toml`. The schema is unchanged — the new TOML sample carries inline `#` comments that JSON could not. Pouch logs a one-line WARN at startup if it still finds a legacy `hook.config.json` in the data directory; auto-migration is intentionally not done (TOML serialisation would lose any comments the user added). Hand-port the values to the new file and remove the old one when ready.
 
 ### 4.2 Resolution
 
 Source: [`src-tauri/src/config.rs`](src-tauri/src/config.rs)
 
-`startup_urls` is read from `hook.config.json` only — there is no CLI / env override channel. Resolution **never panics**:
+`startup_urls` is read from `hook.conf.toml` only — there is no CLI / env override channel. Resolution **never panics**:
 
-1. **`hook.config.json`** is read from: in dev mode, `<CARGO_MANIFEST_DIR>/../hook.config.json` (the repo root); in macOS release mode, `~/Library/Application Support/Pouch/hook.config.json` (seeded from `Pouch.app/Contents/Resources/sample/` on first launch); in Windows release mode, next to `pouch.exe`; `<cwd>/hook.config.json` is consulted as a last-ditch fallback in every mode. The first candidate that parses wins.
+1. **`hook.conf.toml`** is read from: in dev mode, `<CARGO_MANIFEST_DIR>/../hook.conf.toml` (the repo root); in macOS release mode, `~/Library/Application Support/Pouch/hook.conf.toml` (seeded from `Pouch.app/Contents/Resources/sample/` on first launch); in Windows release mode, next to `pouch.exe`; `<cwd>/hook.conf.toml` is consulted as a last-ditch fallback in every mode. The first candidate that parses wins.
 2. Each entry is filtered to http(s); non-http(s) entries are dropped with a `warn` log.
-3. **Empty resolved list** (file missing, field omitted, `null`, `[]`, or every entry was non-http(s)) → on macOS, `dialog::prompt_initial_url` pops a native `NSAlert` titled "Welcome to Pouch" asking for a URL; OK opens that URL as the main window, Cancel / Escape calls `std::process::exit(0)`. On Windows there is no prompt UI, so an empty list is logged at WARN and Pouch refuses to open a window — populate the file and relaunch.
+3. **Empty resolved list** (file missing, field omitted, `[]`, or every entry was non-http(s)) → on macOS, `dialog::prompt_initial_url` pops a native `NSAlert` titled "Welcome to Pouch" asking for a URL; OK opens that URL as the main window, Cancel / Escape calls `std::process::exit(0)`. On Windows there is no prompt UI, so an empty list is logged at WARN and Pouch refuses to open a window — populate the file and relaunch.
 
 A successful parse prints an INFO log, e.g.:
 
 ```
-INFO hook: [config] /path/to/hook.config.json startup_urls = 1 entrie(s)
+INFO hook: [config] /path/to/hook.conf.toml startup_urls = 1 entrie(s)
 ```
 
 > Design note: an earlier internal design called for "panic on missing config", but this was relaxed to "log + fall through" so that Pouch runs out of the box after a clone. The startup-time NSAlert prompt closes the loop on macOS — the user can rescue a missing / empty config without re-opening it manually first.
@@ -322,23 +335,30 @@ INFO hook: [config] /path/to/hook.config.json startup_urls = 1 entrie(s)
 
 Source: [`src-tauri/src/hook/ignore_filter.rs`](src-tauri/src/hook/ignore_filter.rs)
 
-Rules are loaded entirely from `hook.config.json`'s optional `ignore_urls` array — the Rust source ships **no built-in defaults**. Missing field, `null`, or `[]` all mean "no filtering". A match means "**fetch but do not write**": the upstream response is still retrieved and handed to the webview, but the local cache is neither read nor written. The intent is to let implicit browser-emitted telemetry / font requests pass through without polluting `overrides/`.
+Rules are loaded entirely from `hook.conf.toml`'s optional `ignore_urls` array — the Rust source ships **no built-in defaults**. Missing field or `[]` both mean "no filtering". A match means "**fetch but do not write**": the upstream response is still retrieved and handed to the webview, but the local cache is neither read nor written. The intent is to let implicit browser-emitted telemetry / font requests pass through without polluting `overrides/`.
 
-```json
-{
-  "ignore_urls": [
-    { "suffix": "gstatic.com",          "comment": "Google static asset CDN (apex + all subdomains)" },
-    { "suffix": "googletagmanager.com", "comment": "GTM / GA injection scripts" },
-    { "suffix": "google-analytics.com", "comment": "GA reporting endpoint" },
-    { "suffix": "cdn.jsdelivr.net",     "comment": "Public npm CDN" },
-    { "wildcard": "*.google.com",       "comment": "google.com subdomains only (apex excluded)" },
-    { "url_wildcard": "https://example.com/api/*", "comment": "URL glob; * matches any characters" },
-    { "url_regex": "^https://example\\.com/track/.*", "comment": "full-URL regex; caller controls anchors" }
-  ]
-}
+```toml
+ignore_urls = [
+  # Google static asset CDN (apex + all subdomains)
+  { suffix = "gstatic.com" },
+  # GTM / GA injection scripts
+  { suffix = "googletagmanager.com" },
+  # GA reporting endpoint
+  { suffix = "google-analytics.com" },
+  # Public npm CDN
+  { suffix = "cdn.jsdelivr.net" },
+  # google.com subdomains only (apex excluded)
+  { wildcard = "*.google.com" },
+  # URL glob; * matches any characters
+  { url_wildcard = "https://example.com/api/*" },
+  # full-URL regex; caller controls anchors
+  { url_regex = "^https://example\\.com/track/.*" },
+]
 ```
 
-Each entry has **exactly one** of the following four keys — the field name *is* the variant tag (no magic prefix strings on the value). An optional `comment` is documentation-only and ignored at runtime.
+Inline `#` comments next to each entry are the natural way to document intent in TOML. (The legacy v1.0 / v1.1 JSON sample used a `comment` field on each entry for the same purpose; that field is still accepted at parse time for backwards compatibility but is documentation-only and ignored at runtime — the Rust runtime now reads `hook.conf.toml`, where comments belong.)
+
+Each entry has **exactly one** of the following four keys — the field name *is* the variant tag (no magic prefix strings on the value).
 
 | Field          | Match domain | Semantics                                                                                                                                |
 |----------------|--------------|------------------------------------------------------------------------------------------------------------------------------------------|
@@ -347,7 +367,7 @@ Each entry has **exactly one** of the following four keys — the field name *is
 | `url_wildcard` | full URL     | URL glob; `*` matches **any characters (including `/`)**. All other regex meta is escaped. Auto-anchored at both ends.                   |
 | `url_regex`    | full URL     | Raw `regex::Regex` against the full URL. **Not** auto-anchored — the caller controls `^` / `$`.                                          |
 
-Host comparisons parse the URL via the `url` crate, so scheme / port / path / IPv6 brackets are handled correctly. Individual entries that fail to compile (invalid regex, empty / blank value) are warned and skipped without aborting the rest of the list. An entry that omits all four keys, supplies more than one, or uses an unknown key fails JSON parsing for the whole `ignore_urls` array — the loader then warns and falls through with no rules installed.
+Host comparisons parse the URL via the `url` crate, so scheme / port / path / IPv6 brackets are handled correctly. Individual entries that fail to compile (invalid regex, empty / blank value) are warned and skipped without aborting the rest of the list. An entry that omits all four keys, supplies more than one, or uses an unknown key fails TOML parsing for the whole `ignore_urls` array — the loader then warns and falls through with no rules installed.
 
 > **NSURLProtocol constraint behind "fetch but no write"**: see the module docs in [`policy.rs`](src-tauri/src/hook/policy.rs). Once macOS `-startLoading` has been called, the subclass **must** produce a response — there is no NSURLProtocol API to "let go mid-load and fall back to the default loader" — so even on an ignore-list hit we still fetch the body via reqwest and hand it back. The Windows path follows the same semantics so the policy layer can be shared.
 
@@ -363,37 +383,37 @@ Controls the initial window dimensions. VSCode-style naming for clarity — the 
 | `"inherit"` (**default**) | Restore the window's position, size, and mode (maximised / fullscreen) from the previous session. State is persisted in `storage.db` (see §5.5) — every Resize / Move gesture writes the new geometry after a 1-second debounce. Falls back to `"default"`'s 1280x960 geometry on first launch (when no state has been recorded yet — i.e. first-launch fallback to default 1280×960). |
 | `"maximized"` | Fills the work area — excludes the macOS menubar / dock and the Windows taskbar. Implemented via Tauri's `WebviewWindowBuilder::maximized(true)`, which the underlying wry layer forwards to `NSWindow.zoom:` on macOS and `ShowWindow(SW_MAXIMIZE)` on Windows so the OS work area is honoured natively. |
 | `"fullscreen"` | Real fullscreen via `WebviewWindowBuilder::fullscreen(true)` — hides window chrome (title bar, traffic lights, taskbar). |
-| `{ "width": <px>, "height": <px> }` | Fixed logical-pixel inner size via `WebviewWindowBuilder::inner_size(width, height)`. Logical pixels are DPR-independent (a `1280` here is the same physical width on a Retina display as on a non-Retina one). |
+| `{ width = <px>, height = <px> }` | Fixed logical-pixel inner size via `WebviewWindowBuilder::inner_size(width, height)`. Logical pixels are DPR-independent (a `1280` here is the same physical width on a Retina display as on a non-Retina one). |
 
 Examples:
 
-```json
-"window_dimensions": "default"
+```toml
+window_dimensions = "default"
 ```
 
-```json
-"window_dimensions": "inherit"
+```toml
+window_dimensions = "inherit"
 ```
 
-```json
-"window_dimensions": "maximized"
+```toml
+window_dimensions = "maximized"
 ```
 
-```json
-"window_dimensions": "fullscreen"
+```toml
+window_dimensions = "fullscreen"
 ```
 
-```json
-"window_dimensions": { "width": 1280, "height": 800 }
+```toml
+window_dimensions = { width = 1280, height = 800 }
 ```
 
 Validation:
 
-- Unknown string values (e.g. `"Maximized"`, `"FULLSCREEN"`, `"max"`, the legacy v1.0.x value `"screen"`) fail JSON parsing for the whole config file (serde `rename_all = "lowercase"`); the loader then warns and falls through, so the resolved `window_dimensions` defaults to `"inherit"` (first-launch fallback to default 1280×960).
+- Unknown string values (e.g. `"Maximized"`, `"FULLSCREEN"`, `"max"`, the legacy v1.0.x value `"screen"`) fail TOML parsing for the whole config file (serde `rename_all = "lowercase"`); the loader then warns and falls through, so the resolved `window_dimensions` defaults to `"inherit"` (first-launch fallback to default 1280×960).
 - Negative `width` / `height` fail at the `u32` deserialisation step (same fall-through behaviour).
 - Zero `width` or `height` is accepted by `u32` but logged as a `warn` at startup and falls back to `"maximized"` mode.
 
-> **Schema break from v1.0.x**: the previous `window` field has been renamed to `window_dimensions` and the value `"screen"` has been renamed to `"maximized"`. There is no deprecation alias — users upgrading from v1.0.x must edit `hook.config.json` by hand.
+> **Schema break from v1.0.x**: the previous `window` field has been renamed to `window_dimensions` and the value `"screen"` has been renamed to `"maximized"`. There is no deprecation alias — users upgrading from v1.0.x must edit `hook.conf.toml` by hand.
 
 ### 4.5 Logging
 
@@ -401,13 +421,13 @@ The `TAURI_HOOK_LOG` environment variable uses [tracing-subscriber EnvFilter syn
 
 ```bash
 # Default (HIT/MISS plus startup info only)
-bun run tauri dev
+cargo dev
 
 # Debug level (includes detailed MISS URLs, header conversion errors, etc.)
-TAURI_HOOK_LOG=hook=debug bun run tauri dev
+TAURI_HOOK_LOG=hook=debug cargo dev
 
 # Disable all logging
-TAURI_HOOK_LOG=off bun run tauri dev
+TAURI_HOOK_LOG=off cargo dev
 ```
 
 Sample log output (validated end-to-end on macOS — the lead ran it twice with `startup_urls = ["https://www.leelib.com"]`):
@@ -428,7 +448,7 @@ INFO hook: HIT key=www.leelib.com/css/fika.min.xxx.css bytes=30007
 
 ## 5. Cache directory layout
 
-Cache root resolves the same way as `hook.config.json` (see §2.2 / §4.2):
+Cache root resolves the same way as `hook.conf.toml` (see §2.2 / §4.2):
 
 - **dev**: `<repo>/overrides/`
 - **macOS release**: `~/Library/Application Support/Pouch/overrides/`
@@ -506,7 +526,7 @@ Pouch **does not expose** IPC `clear_*` commands — there is no frontend trampo
 
 Source: [`src-tauri/src/storage.rs`](src-tauri/src/storage.rs)
 
-`storage.db` is a small SQLite database that lives **alongside** `hook.config.json` (same parent directory — i.e. `<repo>/storage.db` in dev, `~/Library/Application Support/Pouch/storage.db` on macOS release, `<exe parent>/storage.db` on Windows release). It is the single durable home for every cross-session state slot Pouch maintains — currently the most-recent window geometry (so `window_dimensions: "inherit"` can restore where the user left off) and the macOS Cmd+N recent-URLs history (so the dropdown survives relaunches). Future state slots drop into the same table without inventing another file.
+`storage.db` is a small SQLite database that lives **alongside** `hook.conf.toml` (same parent directory — i.e. `<repo>/storage.db` in dev, `~/Library/Application Support/Pouch/storage.db` on macOS release, `<exe parent>/storage.db` on Windows release). It is the single durable home for every cross-session state slot Pouch maintains — currently the most-recent window geometry (so `window_dimensions: "inherit"` can restore where the user left off) and the macOS Cmd+N recent-URLs history (so the dropdown survives relaunches). Future state slots drop into the same table without inventing another file.
 
 Single VSCode-style key/value table:
 
@@ -547,7 +567,7 @@ CREATE TABLE storage (
 
 Source: [`src-tauri/src/inject.rs`](src-tauri/src/inject.rs)
 
-Pouch supports a Tampermonkey-style "inject on URL match" mechanism: drop any `*.js` file into the `inject/` directory (resolved the same way as `hook.config.json` — see §2.2: repo root in dev, `~/Library/Application Support/Pouch/inject/` on macOS release, next to `pouch.exe` on Windows release) and at startup the file's frontmatter is parsed and assembled into a dispatcher that is injected into the main webview as `initialization_script`. On every top-level navigation the dispatcher decides which rules to trigger based on `location.href`, and each matching rule executes inside its own function scope.
+Pouch supports a Tampermonkey-style "inject on URL match" mechanism: drop any `*.js` file into the `inject/` directory (resolved the same way as `hook.conf.toml` — see §2.2: repo root in dev, `~/Library/Application Support/Pouch/inject/` on macOS release, next to `pouch.exe` on Windows release) and at startup the file's frontmatter is parsed and assembled into a dispatcher that is injected into the main webview as `initialization_script`. On every top-level navigation the dispatcher decides which rules to trigger based on `location.href`, and each matching rule executes inside its own function scope.
 
 `inject/` is scanned **recursively**: any `.js` file at any depth is loaded, so you can group scripts by project (`inject/project1/foo.js`, `inject/utils/shared.js`, …) without flattening them into the top level. Symlinks are not followed. Files load in lexicographic order of their full path, so dispatch order is deterministic across platforms and across runs.
 
@@ -673,9 +693,8 @@ For context, here is how Pouch differs in detail from a CDP-driven interception 
 pouch/
 ├── README.md              # this document
 ├── LICENSE                # MIT
-├── hook.config.json       # user config: startup_urls + window_dimensions + ignore_urls
-├── package.json           # only one devDep: @tauri-apps/cli
-├── bun.lock
+├── hook.conf.toml         # user config: startup_urls + window_dimensions + ignore_urls
+├── .cargo/config.toml     # cargo aliases: `cargo start`, `cargo build-app`
 ├── inject/                # user-script directory (see §6)
 │   ├── global.js                    # demo: @match * console output on every URL
 │   └── www.leelib.com/leelib.js     # demo: @match https://www.leelib.com/* banner
@@ -689,7 +708,7 @@ pouch/
 │       ├── main.rs
 │       ├── lib.rs            # wiring: config::load + install_global + programmatic webview + install_for_webview
 │       ├── inject.rs         # scans inject/*.js + frontmatter parsing + dispatcher generation
-│       ├── config.rs         # json file only (CLI / env override removed in v1.1)
+│       ├── config.rs         # toml file only (CLI / env override removed in v1.1)
 │       ├── cache_store.rs    # atomic write + sidecar + clear_* helpers (no longer wired to IPC)
 │       ├── http_fetcher.rs   # reqwest + rustls + strip conditional headers
 │       ├── dialog.rs         # macOS NSAlert URL prompt + open_extra_window

@@ -41,7 +41,7 @@
 #       * `Pouch-<version>.zip`
 #         A self-contained sample bundle with the layout:
 #             pouch.exe
-#             hook.config.json
+#             hook.conf.toml
 #             inject/
 #                 global.js
 #                 leelib.js
@@ -153,11 +153,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-
       - name: Setup Rust (stable)
         uses: dtolnay/rust-toolchain@stable
 
@@ -171,9 +166,6 @@ jobs:
         with:
           # Cache cargo registry/git AND the per-crate target directory.
           workspaces: './src-tauri -> target'
-
-      - name: Install JS dependencies
-        run: bun install --frozen-lockfile
 
       # ----------------------------------------------------------------------
       # SMOKE-ONLY: `cargo check` on main push / PR. No bundling.
@@ -290,11 +282,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-
       - name: Setup Rust (stable)
         uses: dtolnay/rust-toolchain@stable
 
@@ -302,9 +289,6 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: './src-tauri -> target'
-
-      - name: Install JS dependencies
-        run: bun install --frozen-lockfile
 
       # ----------------------------------------------------------------------
       # SMOKE-ONLY: `cargo check` on main push / PR. No release build, no
@@ -374,7 +358,7 @@ jobs:
           Copy-Item $exeSrc (Join-Path $stage "$crate.exe")
 
           # Sample config + inject scripts live at the project root.
-          Copy-Item (Join-Path $repoRoot 'hook.config.json') $stage
+          Copy-Item (Join-Path $repoRoot 'hook.conf.toml') $stage
           Copy-Item (Join-Path $repoRoot 'inject') $stage -Recurse
 
           # NOTE: overrides/ is intentionally not copied; it holds runtime

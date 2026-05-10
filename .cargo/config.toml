@@ -1,0 +1,17 @@
+# Workspace-level cargo aliases.
+# Replaces the deprecated bun + package.json scripts.
+#
+# Run from the repo root:
+#   cargo dev        -> tauri dev (development mode with hot-reload)
+#   cargo start      -> run the release binary directly (no bundling)
+#   cargo build-app  -> tauri build --no-bundle (compile signed binary into target/release/)
+#   cargo bundle     -> tauri build (full .app + .dmg on macOS, .msi + .exe on Windows)
+#
+# `cargo build` is a built-in cargo subcommand and cannot be aliased; use
+# `cargo build-app` (alias) or `cargo tauri build` (direct) for app bundles.
+
+[alias]
+dev = "tauri dev"
+start = "run --release --manifest-path src-tauri/Cargo.toml"
+build-app = "tauri build --no-bundle"
+bundle = "tauri build"
