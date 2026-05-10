@@ -133,7 +133,18 @@ pub fn start() -> Result<u16, MitmError> {
     // OS trust store as the http path, no separate dep needed.
     let mut http = hyper_util::client::legacy::connect::HttpConnector::new();
     http.enforce_http(false);
-    let tls = native_tls::TlsConnector::new()
+    // Request ALPN h2 (with http/1.1 fallback) so the upstream client can
+    // multiplex many concurrent requests onto a single TCP connection per
+    // host instead of opening N parallel TCP — the latter trips per-IP
+    // connection limits on some servers (manifests as floods of "connection
+    // reset" errors when loading sites with high request fan-out).
+    // hyper-tls's `alpn` feature wires `negotiated_alpn() == "h2"` into
+    // `Connected::negotiated_h2()`, which hyper-util's legacy Client uses
+    // to switch the pool slot to HTTP/2 automatically. Servers that don't
+    // advertise h2 in ALPN transparently fall back to HTTP/1.1.
+    let tls = native_tls::TlsConnector::builder()
+        .request_alpns(&["h2", "http/1.1"])
+        .build()
         .map_err(|e| MitmError::Build(format!("native_tls::TlsConnector::new: {e}")))?;
     let https = hyper_tls::HttpsConnector::from((http, tokio_native_tls::TlsConnector::from(tls)));
 

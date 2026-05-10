@@ -101,7 +101,7 @@ rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] 
 # dep graph, no extra compilation. Using the OS-native TLS stack lets us reach
 # legacy game / WebSocket endpoints whose TLS configuration rustls (with its
 # stricter defaults) refuses.
-hyper-tls = "0.6"
+hyper-tls = { version = "0.6", features = ["alpn"] }
 hyper-util = { version = "0.1", features = ["client-legacy"] }
 native-tls = "0.2"
 tokio-native-tls = "0.3"
