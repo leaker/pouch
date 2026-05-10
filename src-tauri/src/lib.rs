@@ -4,10 +4,11 @@
 //! - Loads `hook.conf.toml` (via [`config::load`]) into a [`config::Config`]
 //!   captured by `move` into the `setup` closure. There is no front-end and
 //!   no IPC, so the config never needs to live in Tauri's state map.
-//! - Calls [`hook::platform::install_global`] *before* building the webview so
-//!   the macOS `NSURLProtocol` + `WKBrowsingContextController` private-selector
-//!   registration is in place when the very first https navigation fires
-//!   (Windows `install_global` is a no-op — see `hook/platform/mod.rs`).
+//! - Calls [`hook::platform::install_global`] *before* building the webview.
+//!   Currently a no-op on every supported platform: macOS uses the MITM
+//!   proxy (started right after this call) and Windows attaches its WebView2
+//!   handler per-webview in `install_for_webview`. Kept as a slot for future
+//!   global-scope hooks. See `hook/platform/mod.rs`.
 //! - Builds the main `WebviewWindow` programmatically with
 //!   `WebviewUrl::External(<first startup_urls entry>)` so the webview
 //!   navigates straight to the upstream origin; no frontend trampoline page
@@ -339,17 +340,19 @@ pub fn run() {
             // `dialog::cache_window_dimensions` for the storage rationale.
             dialog::cache_window_dimensions(cfg.window_dimensions);
 
-            // 1b. Pre-webview platform setup (macOS NSURLProtocol +
-            //    WKBrowsingContextController; no-op on Windows).
+            // 1b. Pre-webview platform setup. No-op today on every supported
+            //    platform (see hook/platform/mod.rs); kept as a slot for
+            //    future global-scope hooks.
             hook::platform::install_global()?;
 
-            // 1c. Phase 1 MITM proxy (macOS only). Bound but **not** yet
-            //    consumed by the webview — verify with curl using
-            //    `--cacert ~/Library/Application Support/Pouch/ca/pouch-ca.pem`.
-            //    Phase 2a points the webview at this proxy via
-            //    `with_proxy_config`.
+            // 1c. MITM proxy (macOS only). Started before any webview is
+            //    built so `proxy_port()` is available when we apply the
+            //    proxy to the WebviewWindowBuilder below. The proxy now
+            //    handles every macOS network interception responsibility
+            //    (cache_store / ignore_filter / cookie / POST body / wss);
+            //    the legacy NSURLProtocol path has been removed.
             //
-            // 1d. Phase 2b CA-trust gate (macOS only). After `start()` has
+            // 1d. CA-trust gate (macOS only). After `start()` has
             //    materialised the CA on disk, prompt the user via NSAlert
             //    if it isn't yet trusted by the login keychain and shell out
             //    to `security add-trusted-cert` on consent. On user-decline
@@ -674,8 +677,8 @@ fn create_main_window_with_url(
         }
     };
 
-    // Phase 2a: route the WKWebView's network stack through our local
-    // MITM proxy on macOS. The proxy is started during `setup` (see the
+    // Route the WKWebView's network stack through our local MITM proxy
+    // on macOS. The proxy is started during `setup` (see the
     // `mitm::start()` call earlier in this file) and binds before any
     // webview is created, so `proxy_port()` is guaranteed to be `Some`
     // here. Windows webviews use WebView2's `WebResourceRequested` API

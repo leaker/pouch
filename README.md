@@ -5,7 +5,7 @@
 
 > Tuck any web app into a local-first desktop pouch.
 
-Pouch is a Rust + Tauri v2 desktop app (macOS + Windows) that wraps any web URL into a native window and transparently caches its HTTP/HTTPS traffic at the platform network layer (NSURLProtocol on macOS, WebView2 `WebResourceRequested` on Windows). Cookies, origin, CSP, and SRI all behave exactly as on the live site, with zero frontend rewriting. A URL-scoped, Tampermonkey-style `inject/*.js` channel lets you run custom JS at `document_start` on a per-pattern basis — useful for offline-first wrappers, CDN-asset overrides, or one-off page patches without touching the upstream site.
+Pouch is a Rust + Tauri v2 desktop app (macOS + Windows) that wraps any web URL into a native window and transparently caches its HTTP/HTTPS traffic. macOS uses an in-process MITM HTTPS proxy (the WKWebView is pointed at `http://127.0.0.1:<auto-port>` via Tauri's `with_proxy_config`, with a per-launch CA generated and trusted into the login keychain on first run); Windows uses the native WebView2 `WebResourceRequested` API. Cookies, origin, CSP, and SRI all behave exactly as on the live site, with zero frontend rewriting. A URL-scoped, Tampermonkey-style `inject/*.js` channel lets you run custom JS at `document_start` on a per-pattern basis — useful for offline-first wrappers, CDN-asset overrides, or one-off page patches without touching the upstream site.
 
 The metaphor: like a hamster stuffing food into its cheek pouch, Pouch quietly stashes web resources into a local on-disk cache (`overrides/<host>/<path>`). First load fills the pouch; subsequent loads pull straight from disk with no network request.
 
@@ -20,14 +20,14 @@ How Pouch compares to a CDP-based interception approach (e.g. an Electron app dr
 | Aspect | CDP-based approach | Pouch |
 |---|---|---|
 | Stack | Electron + Node.js + Chromium | Rust + Tauri v2 + system WebView |
-| Interception layer | Chrome DevTools Protocol (CDP) `Fetch.requestPaused` | Platform-native network stack: macOS `NSURLProtocol` / Windows `WebView2 WebResourceRequested` |
+| Interception layer | Chrome DevTools Protocol (CDP) `Fetch.requestPaused` | macOS in-process MITM HTTPS proxy (auto-trusted CA) / Windows `WebView2 WebResourceRequested` |
 | Cookie / Origin / CSP | Automatically correct (CDP intercepts inside the engine) | Automatically correct (native network stack intercepts inside the engine) |
 | Platform support | mac + Windows | mac + Windows |
 | `Content-Type` recovery | Often guessed from filename on subsequent reads | Sidecar `.meta.json` persists the original response headers |
 | Write-to-disk atomicity | Direct `fs.writeFile` | `tempfile::NamedTempFile + persist` (POSIX `rename(2)`) |
 | Binary size | ~100 MB+ (bundles Chromium) | ~10 MB (uses the system WebView; **not yet measured, TODO**) |
 
-In short: Pouch delivers equivalent capability with a smaller binary plus the system WebView, structures the cache metadata, and makes disk writes atomic. The trade-off: **macOS depends on a private WebKit selector** (same risk profile as Electron — see §9).
+In short: Pouch delivers equivalent capability with a smaller binary plus the system WebView, structures the cache metadata, and makes disk writes atomic. The trade-off on macOS: an in-process MITM proxy plus a Pouch-generated CA that has to be trusted into the login keychain (one-time consent dialog on first launch).
 
 ## 2. Quick start
 
@@ -96,9 +96,8 @@ After launch the window opens directly on that URL, and every subresource reques
 INFO hook: [config] /path/to/hook.conf.toml startup_urls = 1 entrie(s)
 INFO hook: [startup] startup_urls = 1 entrie(s)
 INFO hook: [startup] cache root = /path/to/overrides
-DEBUG hook: [hook][mac] registerClass -> ok
-DEBUG hook: [hook][mac] WKBrowsingContextController.registerSchemeForCustomProtocol: https + http
-INFO hook: [hook][mac] NSURLProtocol installed; https/http routed through HookURLProtocol
+INFO hook: [mitm] proxy listening on 127.0.0.1:<port>
+INFO hook: [mitm] CA already trusted in login keychain (or: prompted user, install ok)
 ```
 
 ### 2.4 Optional environment variables
@@ -175,28 +174,25 @@ Once the page reports its real `<title>`, Tauri's `on_document_title_changed` sw
 ┌─────────────────────────────────────────────────────────────┐
 │              Rust backend (Tauri v2)                        │
 │                                                              │
-│  hook (native interception entry)                           │
+│  native interception entry                                  │
 │       │                                                     │
 │       │   ┌──── #[cfg(windows)]                             │
-│       ├───┤   platform/windows.rs                           │
+│       ├───┤   hook/platform/windows.rs                      │
 │       │   │   ICoreWebView2_22 +                            │
 │       │   │   WebResourceRequested                          │
+│       │   │   ↓ uses hook/policy.rs                         │
 │       │   └──── #[cfg(macos)]                               │
-│       │        platform/macos.rs                            │
-│       │        NSURLProtocol +                              │
-│       │        WKBrowsingContextController                  │
-│       │        (private selector)                           │
+│       │        mitm/ (hudsucker)                            │
+│       │        in-process HTTPS MITM proxy +                │
+│       │        per-launch CA + login-keychain trust         │
+│       │        webview routed via                           │
+│       │        WebviewWindowBuilder.proxy_url(...)          │
 │       ▼                                                     │
-│  hook/policy.rs ◄─── platform-shared business logic         │
-│       │   - ignore_filter blacklist                         │
-│       │   - cache_store::read (HIT serves from local)       │
-│       │   - http_fetcher::fetch + write (MISS hits upstream)│
-│       │   - 30-second upstream timeout                      │
-│       │                                                     │
-│       ├── cache_store     atomic write + sidecar metadata   │
-│       ├── http_fetcher    reqwest + rustls + strip          │
-│       │                   conditional headers               │
-│       └── ignore_filter   config-driven blacklist           │
+│  shared services                                            │
+│       │   - cache_store     atomic write + sidecar metadata │
+│       │   - ignore_filter   config-driven blacklist         │
+│       │   - http_fetcher    reqwest + rustls + strip        │
+│       │                     conditional headers (Win path)  │
 └──────────────────┬──────────────────────────────────────────┘
                    │
                    ▼
@@ -210,7 +206,7 @@ Once the page reports its real `<title>`, Tauri's `on_document_title_changed` sw
 **Startup sequence** (see [`src-tauri/src/lib.rs`](src-tauri/src/lib.rs)):
 
 1. `config::load()` resolves `startup_urls`
-2. `hook::platform::install_global()` — pre-webview platform setup (macOS registers `NSURLProtocol` plus the private selector; Windows is a no-op)
+2. macOS-only: `mitm::start()` boots the in-process HTTPS MITM proxy on a random localhost port and `mitm::ensure_ca_trusted()` runs the first-launch keychain consent flow. `hook::platform::install_global()` is a no-op slot kept for future global-scope hooks (Windows likewise has nothing to do here — its handler attaches per-webview)
 3. `inject::scan_inject_dir()` + `build_dispatcher_js()` — scans `inject/*.js` and assembles the dispatcher (see §6)
 4. `WebviewWindowBuilder::new(app, "main", WebviewUrl::External(startup_urls[0]))` builds the main webview programmatically, attaches `on_document_title_changed`, and optionally attaches the dispatcher as `initialization_script`. Subsequent `startup_urls` entries are opened as extra windows via `dialog::open_extra_window`. If the resolved `startup_urls` list is empty, a `dialog::prompt_initial_url` NSAlert collects a single URL from the user (Cancel exits)
 5. `hook::platform::install_for_webview(app.handle())` — post-webview platform setup (Windows attaches `WebResourceRequested` to the main window; macOS is a no-op)
@@ -221,23 +217,25 @@ Once the page reports its real `<title>`, Tauri's `on_document_title_changed` sw
 2. Non-GET / local hosts (`localhost` / `127.0.0.1` / `::1` / `*.localhost`) → `SetResponse` is not called and the webview falls back to its default network stack
 3. `ignore_filter::is_ignored(url)` matches → `policy::evaluate` still runs but only fetches without writing (see §4.3)
 4. `cache_store::read(cache_key)` hits → assemble a local response (200 + Content-Type from the sidecar)
-5. Cache miss → `http_fetcher::fetch` (30-second timeout, conditional headers stripped) → `cache_store::write` (atomic) → response is written back to the webview
+5. Cache miss → upstream fetch → `cache_store::write` (atomic) → response is written back to the webview. The two backends use different fetch paths: **macOS** lets hudsucker's own client forward the request upstream and re-seal the response under the per-host leaf cert (no conditional-header stripping); **Windows** calls `http_fetcher::fetch` (reqwest, 30-second timeout, conditional headers stripped) and then `cache_store::write`
 
-The platform layer is responsible only for "how to capture the request / how to send the response"; all business policy lives in `policy.rs` to avoid drift between the two backends.
+The two backends share `cache_store` / `ignore_filter` / `inject`, but the cache lookup and ignore-filter check are wired in separately in each path: Windows runs them through `policy::evaluate`, while macOS inlines the same checks in `mitm/handler.rs` against hudsucker's request/response hooks. `policy.rs` and `http_fetcher.rs` are Windows-only today; the macOS MITM path drives `cache_store` / `ignore_filter` directly without going through them.
 
-### 3.1 macOS: NSURLProtocol + WKBrowsingContextController (private selector)
+### 3.1 macOS: in-process MITM HTTPS proxy
 
-Source: [`src-tauri/src/hook/platform/macos.rs`](src-tauri/src/hook/platform/macos.rs)
+Source: [`src-tauri/src/mitm/`](src-tauri/src/mitm/)
 
-Three things happen at startup:
+The earlier `NSURLProtocol` + `WKBrowsingContextController` private-selector path was retired once the MITM proxy reached parity (cache_store / ignore_filter / cookie / POST body / wss). On macOS Pouch now ships a single interception strategy: an in-process HTTPS MITM proxy.
 
-1. `objc2::define_class!` declares `HookURLProtocol : NSURLProtocol` at compile time, with `+canInitWithRequest:` / `+canonicalRequestForRequest:` / `-startLoading` / `-stopLoading` attached
-2. `[NSURLProtocol registerClass: HookURLProtocol]`
-3. `[WKBrowsingContextController registerSchemeForCustomProtocol: @"https"]` + `@"http"`
+What runs at startup:
 
-The `registerSchemeForCustomProtocol:` selector used in step 3 is a **private selector** on `WKBrowsingContextController` — this is the only public-callable-but-private way to add `https`/`http` to WKWebView's interceptable scheme allow-list. Electron uses the same mechanism internally; the community project [yue/yue (Cheng Zhao's new framework), `nu_custom_protocol.mm`](https://github.com/yue/yue/blob/master/nativeui/mac/browser/nu_custom_protocol.mm) has demonstrated it remains usable through macOS 15. The macOS implementation here is a Rust + objc2 translation of that blueprint.
+1. `mitm::start()` generates (or loads from `~/Library/Application Support/Pouch/ca/`) a Pouch-owned root CA via `rcgen`, then boots a `hudsucker`-based proxy on `127.0.0.1:<auto-port>`. Per-host leaf certs are minted on demand and signed by the local CA
+2. `mitm::ensure_ca_trusted()` checks whether the CA is already trusted by the login keychain; if not, an `NSAlert` asks the user for consent and `security add-trusted-cert` is invoked on OK. Decline / install failure → a final explanation alert and `process::exit(1)`. Once trusted, subsequent launches skip the prompt entirely
+3. `WebviewWindowBuilder::proxy_url("http://127.0.0.1:<port>")` (Tauri's `with_proxy_config`, behind the `macos-proxy` feature) routes every WKWebView request through the proxy. Because the leaf certs chain back to the trusted CA, the WKWebView accepts them with no certificate UI
 
-Request flow: the webview emits an https request → `+canInitWithRequest:` accepts it (GET, non-local host, no `X-Hook-Bypass: 1` marker) → `-startLoading` is invoked on the main thread → snapshot the URL/headers, then `tokio::spawn` onto a dedicated multi-thread runtime to run `policy::evaluate` → on completion, `DispatchQueue::main().exec_async(...)` jumps back to the main thread and sends `didReceiveResponse:` + `didLoadData:` + `URLProtocolDidFinishLoading:` through the `URLProtocolClient`.
+Request flow: the WKWebView opens a TLS tunnel to the proxy → hudsucker decrypts and hands the request to Pouch's handler → handler consults `ignore_filter` and `cache_store` (HIT serves from local; MISS forwards upstream via a custom native-tls connector, then writes back through `cache_store`) → response is re-encrypted under the per-host leaf cert and returned to the WKWebView. Non-GET / WebSocket upgrades flow through unchanged. See [`src-tauri/src/mitm/handler.rs`](src-tauri/src/mitm/handler.rs).
+
+No private API is used on macOS any more — the only platform-specific dependency is shelling out to `security` for keychain trust on first launch.
 
 ### 3.2 Windows: ICoreWebView2_22 WebResourceRequested
 
@@ -369,7 +367,7 @@ Each entry has **exactly one** of the following four keys — the field name *is
 
 Host comparisons parse the URL via the `url` crate, so scheme / port / path / IPv6 brackets are handled correctly. Individual entries that fail to compile (invalid regex, empty / blank value) are warned and skipped without aborting the rest of the list. An entry that omits all four keys, supplies more than one, or uses an unknown key fails TOML parsing for the whole `ignore_urls` array — the loader then warns and falls through with no rules installed.
 
-> **NSURLProtocol constraint behind "fetch but no write"**: see the module docs in [`policy.rs`](src-tauri/src/hook/policy.rs). Once macOS `-startLoading` has been called, the subclass **must** produce a response — there is no NSURLProtocol API to "let go mid-load and fall back to the default loader" — so even on an ignore-list hit we still fetch the body via reqwest and hand it back. The Windows path follows the same semantics so the policy layer can be shared.
+> **"Fetch but no write" rationale**: ignore-list URLs still need a response body for the webview to render. The Windows `policy::evaluate` path inherited an NSURLProtocol-era constraint ("once you've accepted the load, you must produce a response"); the macOS MITM proxy has the same shape because hudsucker's handler API also requires emitting a response — it simply forwards transparently. Either way the cache is left untouched on an ignore-list match.
 
 ### 4.4 `window_dimensions`
 
@@ -636,24 +634,24 @@ INFO hook: [startup] inject rules = 2 (dispatcher WILL be attached)
 
 | Platform | Status | Notes |
 |---|---|---|
-| macOS 13 / 14 / 15 | Fully supported (validated) | NSURLProtocol + private selector; the lead has run two cycles of MISS+HIT across 9 resources against `https://www.leelib.com` |
-| macOS 11 / 12 | Should work (**not validated**) | The private selector has existed since macOS 10.10; objc2 0.6 and dispatch2 0.3 also support older macOS versions |
-| macOS 17+ | Future risk | Apple may remove `WKBrowsingContextController.registerSchemeForCustomProtocol:`; same risk as Electron |
+| macOS 13 / 14 / 15 | Fully supported (validated) | In-process MITM HTTPS proxy + Pouch-generated CA trusted into the login keychain on first launch |
+| macOS 11 / 12 | Should work (**not validated**) | hudsucker / rcgen / aws-lc-rs all support macOS 10.x+; `security add-trusted-cert` exists since OS X 10.6 |
+| macOS 17+ | Low risk | No private WebKit selectors involved any more; the only macOS-specific surface is `security`-based keychain trust |
 | Windows 11 / 10 1809+ | Implementation complete (**not validated**) | `ICoreWebView2_22` public API; requires WebView2 Runtime ≥ 1.0.2210.55 |
 | Windows older Runtime | Fallback | Auto-falls back to `AddWebResourceRequestedFilter`; covers document/iframe only, **not** subresources / workers |
 | Window title | Auto-synced | Bridged via Tauri v2 `on_document_title_changed` to WKWebView title KVO on macOS and WebView2 `DocumentTitleChanged` on Windows; SPA route changes that update `document.title` also fire |
 
 ### macOS App Store
 
-**Cannot be shipped through the App Store** — Apple's MAS review scans for private selectors and will reject. Pouch is positioned as a developer / personal-use tool, not for store distribution. If you need the store channel, fall back to the Electron + CDP route (Electron likewise depends on a set of Apple private APIs, but its entitlements are tacitly accepted by Apple; third parties travelling the same path face higher risk).
+**Not currently positioned for App Store distribution.** Even though Pouch no longer touches any private WebKit selector (the MITM proxy + per-launch CA replaced the old `NSURLProtocol` path), shipping a tool that installs its own root CA into the user's login keychain — and intercepts every webview HTTPS request through a local MITM — is a poor fit for MAS sandboxing rules. Pouch is positioned as a developer / personal-use tool. If you need the store channel, drop the MITM layer or fall back to the Electron + CDP route.
 
 ## 8. Known limitations
 
 - **WebSockets are not intercepted**: neither backend can capture WebSocket frames after the upgrade handshake; same limitation as Electron CDP (CDP also only intercepts HTTP)
 - **POST / non-GET is not cached**: `policy::evaluate` only handles GET. The platform layer checks the method at the entry point and lets non-GET through directly (the macOS path returns NO from `+canInitWithRequest:`; the Windows path returns from the handler without calling `SetResponse`), letting the webview use its default network stack
-- **No HTTP conditional requests**: `http_fetcher::fetch` actively strips `If-None-Match` / `If-Modified-Since` / `If-Match` / `If-Unmodified-Since` / `If-Range`, always pulling the full body. Hits serve from cache without a conditional request; ETag / Last-Modified are recorded in the sidecar for future use only
+- **No HTTP conditional requests**: on the Windows path, `http_fetcher::fetch` actively strips `If-None-Match` / `If-Modified-Since` / `If-Match` / `If-Unmodified-Since` / `If-Range`, always pulling the full body. The macOS MITM path forwards request headers through hudsucker unchanged — but every cache HIT short-circuits at `mitm::handler::handle_request` and the upstream is never contacted, so conditional revalidation never runs there either. Hits serve from cache without a conditional request; ETag / Last-Modified are recorded in the sidecar for future use only
 - **fragment is dropped from the cache key**: `#a` and `#b` share one cache entry (this is correct per HTTP — fragments never reach the server). Distinct query strings, on the other hand, **do** map to distinct cache entries (`?v=1` and `?v=2` are stored separately) so dynamic signed URLs like `?time=…&sign=…` no longer replay stale tokens — see §5.2
-- **Top-level navigation also goes through the interceptor**: the main webview is started programmatically with `WebviewUrl::External(startup_urls[0])`, and the first frame's top-level document request is **also** covered by the native interception layer (macOS NSURLProtocol and Windows WebView2 WebResourceRequested both catch it), so `index.html` is cached on first launch
+- **Top-level navigation also goes through the interceptor**: the main webview is started programmatically with `WebviewUrl::External(startup_urls[0])`, and the first frame's top-level document request is **also** covered by the native interception layer (the macOS MITM proxy and Windows WebView2 `WebResourceRequested` both catch it), so `index.html` is cached on first launch
 - **JS injection does not re-run on SPA route changes**: `inject/*.js` runs once at document_start; pseudo-navigations performed by frontend frameworks via `history.pushState` will **not** re-trigger the rules. Hook the history API yourself if you need to react to route changes (see §6.2)
 - **`@match *` matches every URL**: including `about:blank` and `data:` subframes. Narrow it to at least `@match https://*` to match only http(s) origins
 - **Cookie isolation**: cookies are split between two stores. The **webview** owns its own cookie jar (`NSHTTPCookieStorage` on macOS, the WebView2 cookie manager on Windows) and **reqwest** keeps its own in-process jar (enabled via `cookie_store(true)`). On a cache MISS / ignore-list passthrough, upstream `Set-Cookie` headers are forwarded verbatim to the webview (so it stores the cookie and replays it on subsequent requests) **and** stored in reqwest's jar (so further reqwest-driven fetches in the same session also carry it). The two jars are not bidirectionally synchronised, so cookies set by JS inside the webview are not visible to reqwest, and vice versa. `Set-Cookie` is **never** persisted in the cache sidecar — replay would leak a stale session cookie — so cache HITs serve the body without re-emitting cookies, leaving whatever the live cookie jars hold untouched
@@ -667,25 +665,25 @@ For context, here is how Pouch differs in detail from a CDP-driven interception 
 
 | Aspect | CDP-based | Pouch |
 |---|---|---|
-| Interception method | CDP `Fetch.requestPaused` | macOS `NSURLProtocol` + Windows `WebView2 WebResourceRequested` |
+| Interception method | CDP `Fetch.requestPaused` | macOS in-process MITM HTTPS proxy + Windows `WebView2 WebResourceRequested` |
 | Cookie / Origin / CSP | Automatically correct | Automatically correct (same abstraction layer) |
 | Cache key algorithm | `host + pathname` (typical) | `host + pathname[__qs<query-hash>]` (query-aware) |
 | Cache directory layout | `overrides/<host>/<path>` (typical) | `overrides/<host>/<path>` |
 | `Content-Type` on cache hit | Often lost (raw `fulfillRequest` without headers) | Sidecar stores `content_type`, read directly on hits |
 | Write atomicity | Direct `fs.writeFile` (crash leaves a half-written file) | `tempfile::NamedTempFile + persist` (POSIX `rename(2)`) |
-| HTTP `Range` requests | Often not supported (raw full-body `fulfillRequest`) | Platform layer always responds with the full body; `Range` is handled by the engine (the standard NSURLProtocol / WebResourceRequested model) |
+| HTTP `Range` requests | Often not supported (raw full-body `fulfillRequest`) | Platform layer always responds with the full body; `Range` is handled by the engine (the proxy / WebResourceRequested model) |
 | Sidecar metadata | None | `original_url` / `content_type` / `etag` / `last_modified` / `saved_at` |
 | Frontend transparency | Full (CDP intercepts inside the engine) | Full (native network stack intercepts; no frontend trampoline page either) |
 | User-script injection | Roll your own | Tampermonkey-style `inject/*.js`, URL-rule dispatcher injected at document_start (see §6) |
 | Window title sync | Engine default (built into Chromium) | Tauri v2 `on_document_title_changed` bridges WKWebView KVO / WebView2 `DocumentTitleChanged` |
 | Platform support | mac / win | mac / win |
-| Private API dependency | None (CDP is a public Chromium protocol) | macOS only: `WKBrowsingContextController.registerSchemeForCustomProtocol:` |
-| Mac App Store | OK (Electron entitlements tacitly accepted) | Not OK (private selector is a hard reject) |
+| Private API dependency | None (CDP is a public Chromium protocol) | None (macOS proxies via Tauri's public `with_proxy_config`; the MITM proxy + per-launch CA replace the old private-selector path) |
+| Mac App Store | OK (Electron entitlements tacitly accepted) | Not currently positioned for MAS — installing a local root CA + running a MITM proxy is a poor fit for the sandbox |
 | HTTP client | Node.js default (OpenSSL) | reqwest + rustls-TLS (no system OpenSSL dependency) |
 | Logging | `console.log` | `tracing` structured logs, controlled via `TAURI_HOOK_LOG` |
 | Binary size | ~100 MB+ (bundles Chromium) | ~10 MB (**not measured** — measure with `tauri build` in your fork and update this row) |
 
-**Key trade-off**: Pouch trades a private-API dependency on macOS (same risk as Electron) for a much smaller binary, structured cache metadata, atomic writes, and a built-in URL-rule injection mechanism. If your goal is the Mac App Store, the Electron + CDP route remains the right pick.
+**Key trade-off**: Pouch trades a one-time login-keychain consent dialog on macOS (the per-launch MITM CA needs to be trusted before the WKWebView will accept the proxied TLS leaves) for a much smaller binary, structured cache metadata, atomic writes, and a built-in URL-rule injection mechanism. If your goal is the Mac App Store, the Electron + CDP route remains the right pick.
 
 ## 10. Project layout
 
@@ -706,29 +704,34 @@ pouch/
 │   ├── build.rs
 │   └── src/
 │       ├── main.rs
-│       ├── lib.rs            # wiring: config::load + install_global + programmatic webview + install_for_webview
+│       ├── lib.rs            # wiring: config::load + mitm::start (macOS) + programmatic webview + install_for_webview (Windows)
 │       ├── inject.rs         # scans inject/*.js + frontmatter parsing + dispatcher generation
 │       ├── config.rs         # toml file only (CLI / env override removed in v1.1)
 │       ├── cache_store.rs    # atomic write + sidecar + clear_* helpers (no longer wired to IPC)
-│       ├── http_fetcher.rs   # reqwest + rustls + strip conditional headers
+│       ├── http_fetcher.rs   # Windows-only: reqwest + rustls + strip conditional headers (macOS forwards via hudsucker)
 │       ├── dialog.rs         # macOS NSAlert URL prompt + open_extra_window
 │       ├── titlebar.rs       # macOS NSTitlebarAccessoryViewController three buttons + spinner
 │       ├── storage.rs        # SQLite-backed window_state / recent_urls persistence
 │       ├── bootstrap.rs      # macOS first-run copy default config from .app/Contents/Resources/sample/
 │       ├── util.rs           # pretty_path / lexical_normalize + macos_app_support_dir + DEFAULT_WINDOW_WIDTH/HEIGHT
+│       ├── mitm/              # macOS only: in-process MITM HTTPS proxy (hudsucker)
+│       │   ├── mod.rs         # start() + ensure_ca_trusted() + apply_proxy_to_builder() + LearnerLayer
+│       │   ├── ca.rs          # rcgen-generated root CA, persisted under <app-support>/ca/
+│       │   ├── handler.rs     # hudsucker request handler: ignore_filter / cache HIT-MISS / forward
+│       │   ├── trust.rs       # NSAlert + `security add-trusted-cert` keychain consent flow
+│       │   └── learned.rs     # tracing layer that records hosts whose upstream TLS reqwest can't talk to
 │       └── hook/
 │           ├── mod.rs
 │           ├── ignore_filter.rs    # config-driven ignore_urls matchers
-│           ├── policy.rs           # Decision::{Respond, Bypass} shared business logic
+│           ├── policy.rs           # Windows-only Decision::{Respond, Bypass} logic (macOS inlines the equivalent in mitm/handler.rs)
 │           └── platform/
-│               ├── mod.rs          # cfg dispatch; install_global / install_for_webview
-│               ├── macos.rs        # NSURLProtocol + private selector (install_global)
+│               ├── mod.rs          # cfg dispatch; install_global / install_for_webview (macOS no-op)
 │               └── windows.rs      # WebView2 + add_WebResourceRequested (install_for_webview)
 └── overrides/             # cache root (created at runtime)
     └── .gitkeep
 ```
 
-> Local-only directories (gitignored, never tracked): `tasks/` (planning notes + decisions), `tests/` (scratch test dir), `node_modules/`, `target/`, `dist/`, plus `storage.db*` runtime state files. See [`.gitignore`](.gitignore) for the full list.
+> Local-only directories (gitignored, never tracked): `tasks/` (planning notes + decisions), `tests/` (scratch test dir), `target/`, `dist/`, plus `storage.db*` runtime state files. See [`.gitignore`](.gitignore) for the full list.
 
 > Architectural note: there is no `frontend/` directory and no `commands.rs` — Pouch deliberately has zero frontend runtime and zero IPC surface. `tauri.conf.json` does not declare `build`, `app.security`, or `app.withGlobalTauri`; the main window is built programmatically in `lib.rs` with `WebviewWindowBuilder::new(app, "main", WebviewUrl::External(startup_urls[0]))`.
 

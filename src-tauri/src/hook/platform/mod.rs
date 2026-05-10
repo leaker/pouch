@@ -1,31 +1,21 @@
 //! Platform-specific native interception entry point.
 //!
-//! v2 native interception is split across two startup phases because the
-//! per-platform requirements are mutually exclusive:
-//!
-//! - **macOS** registers `HookURLProtocol` with `NSURLProtocol` and asks
-//!   `WKBrowsingContextController` to route `https`/`http` through it. This
-//!   MUST happen *before* any webview navigates, otherwise the first request
-//!   bypasses the protocol class.
-//! - **Windows** attaches a `WebResourceRequested` handler to the WebView2
-//!   `ICoreWebView2Controller`. The controller is only obtainable *after* the
-//!   webview has been built (Tauri's `with_webview` requires a live
-//!   `WebviewWindow`).
-//!
-//! `install_global` runs before webview creation (real on macOS, no-op on
-//! Windows). `install_for_webview` runs after webview creation (real on
-//! Windows, no-op on macOS). Pouch only ships for macOS and Windows — any
-//! other target fails to compile via [`compile_error!`] below.
+//! - **macOS**: handled entirely by the MITM proxy (`crate::mitm`). The old
+//!   `NSURLProtocol` + `WKBrowsingContextController` private-selector path
+//!   was removed once the MITM proxy reached parity (cache_store /
+//!   ignore_filter / cookie / POST body / wss). `install_global` /
+//!   `install_for_webview` are no-ops on macOS — the proxy is started from
+//!   `lib.rs` directly.
+//! - **Windows**: WebView2 `WebResourceRequested` via `ICoreWebView2_22`. The
+//!   handler can only be attached *after* the webview has been built (Tauri's
+//!   `with_webview` requires a live `WebviewWindow`), so it lives in
+//!   `install_for_webview`.
 
-// Pouch only supports macOS and Windows. Fail loudly at compile time on any
-// other target rather than silently skipping native interception.
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-compile_error!("pouch only supports macOS and Windows");
-
-#[cfg(target_os = "macos")]
-pub mod macos;
 #[cfg(target_os = "windows")]
 pub mod windows;
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+compile_error!("pouch only supports macOS and Windows");
 
 use thiserror::Error;
 
@@ -33,51 +23,30 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum InstallError {
     /// The platform-specific implementation reported a setup failure (failed
-    /// to acquire the WebView2 controller, COM cast failure, objc class
-    /// declaration failure, etc.).
+    /// to acquire the WebView2 controller, COM cast failure, etc.).
     #[error("platform interceptor install failed: {0}")]
     Platform(String),
 }
 
-/// Pre-webview platform setup. Runs once at app startup *before* any webview
-/// is built — required on macOS so `NSURLProtocol` + the
-/// `WKBrowsingContextController` private selector are wired in before the
-/// first navigation. No-op on Windows (the WebView2 handler can only be
-/// attached once a controller exists, see [`install_for_webview`]).
+/// Pre-webview platform setup. Currently a no-op on every supported platform:
+/// macOS uses the MITM proxy (started from `lib.rs`) and Windows attaches its
+/// WebView2 handler per-webview in [`install_for_webview`]. Kept as a slot
+/// for future global-scope hooks.
 pub fn install_global() -> Result<(), InstallError> {
-    #[cfg(target_os = "macos")]
-    {
-        macos::install_global()
-    }
-    #[cfg(target_os = "windows")]
-    {
-        tracing::debug!(
-            target: "hook",
-            "[hook][win] install_global no-op (WebView2 handler attaches in install_for_webview)"
-        );
-        Ok(())
-    }
+    Ok(())
 }
 
 /// Post-webview platform setup. Runs once from the Tauri `setup` callback
 /// *after* the main `WebviewWindow` has been built — required on Windows so
 /// we can resolve the `ICoreWebView2Controller` and register the
-/// `WebResourceRequested` handler. No-op on macOS (the global registration
-/// already covers every webview).
+/// `WebResourceRequested` handler. No-op on macOS (the MITM proxy already
+/// covers every webview).
 pub fn install_for_webview<R: tauri::Runtime>(
-    app: &tauri::AppHandle<R>,
+    _app: &tauri::AppHandle<R>,
 ) -> Result<(), InstallError> {
     #[cfg(target_os = "windows")]
     {
-        windows::install_for_webview(app)
+        windows::install_for_webview(_app)?;
     }
-    #[cfg(target_os = "macos")]
-    {
-        let _ = app;
-        tracing::debug!(
-            target: "hook",
-            "[hook][mac] install_for_webview no-op (NSURLProtocol registered globally in install_global)"
-        );
-        Ok(())
-    }
+    Ok(())
 }

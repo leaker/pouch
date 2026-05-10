@@ -52,17 +52,18 @@ webview2-com = "0.38"
 windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_WinRT", "Win32_UI_Shell"] }
 windows-core = "0.61"
 
-# macOS-specific deps for the WKWebView/NSURLProtocol native interceptor
-# (phase I). Versions aligned with wry's transitive lockfile (see cargo tree).
+# macOS-specific deps. The legacy NSURLProtocol-based interceptor was
+# removed once the MITM proxy reached parity, so the `objc2-web-kit` /
+# `block2` / `dispatch2` deps it pulled in are no longer needed; the
+# remaining objc2-* crates serve dialog / titlebar / mitm trust UI on AppKit.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-foundation = "0.3"
-objc2-web-kit = "0.3"
-# Used for the Cmd+Shift+O / titlebar-button "Reveal Pouch Folder in Finder"
-# entry points on macOS. Version aligned with wry's transitive
-# `objc2-app-kit 0.3.2` (see Cargo.lock — we add as a direct dep so the
-# explicit feature set below is always satisfied even if upstream tao/wry
-# stops requiring it transitively).
+# Used for dialog.rs / titlebar.rs / mitm/trust.rs entry points (NSAlert,
+# NSTitlebarAccessoryViewController, etc). Version aligned with wry's
+# transitive `objc2-app-kit 0.3.2` (see Cargo.lock — we add as a direct dep
+# so the explicit feature set below is always satisfied even if upstream
+# tao/wry stops requiring it transitively).
 objc2-app-kit = { version = "0.3", features = [
     "NSButton",
     "NSCell",
@@ -76,12 +77,7 @@ objc2-app-kit = { version = "0.3", features = [
     "NSTitlebarAccessoryViewController",
     "NSLayoutConstraint",
 ] }
-block2 = "0.6"
-# Used by the macOS interceptor to hop NSURLProtocolClient callbacks back onto
-# the main thread (`DispatchQueue::main().exec_async(...)`). Pinned to the same
-# version wry transitively pulls in (see `cargo tree | grep dispatch2`).
-dispatch2 = "0.3"
-# Phase 1 MITM proxy (mitm/ module). hudsucker = HTTP/S MITM core (CONNECT
+# MITM proxy (mitm/ module). hudsucker = HTTP/S MITM core (CONNECT
 # parsing + per-host leaf cert generation via rcgen). `full` enables
 # decoder + http2 + rcgen-ca + rustls-client + native-tls-client + openssl-ca;
 # we only need the rustls + rcgen + http2 set, but the binary-size cost of the
