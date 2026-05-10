@@ -20,7 +20,7 @@
 //! windows. This is a hard schema break with no deprecation alias; users
 //! upgrading from v1.0.x must migrate their config by hand.
 //!
-//! Format note: as of v1.1.4, the user-facing config file has moved from
+//! Format note: as of v2.0.0, the user-facing config file has moved from
 //! `hook.config.json` to `hook.conf.toml`. The schema is unchanged (TOML maps
 //! cleanly to the same serde types), but the format switch lets the shipped
 //! sample carry rich inline documentation that JSON cannot. Users with an
@@ -285,7 +285,7 @@ fn warn_if_legacy_json_present() {
         if legacy.is_file() {
             warn!(
                 target: "hook",
-                "[config] legacy {} found; the user-config format moved to hook.conf.toml in v1.1.4. \
+                "[config] legacy {} found; the user-config format moved to hook.conf.toml in v2.0.0. \
                  Please port your settings to hook.conf.toml — the old JSON is no longer read.",
                 pretty_path(&legacy).display()
             );

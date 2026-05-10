@@ -309,7 +309,7 @@ Fields:
 
 > **Schema break in v1.1**: the previous fields `target_url` (single string) and `windows` (array) have been **unified into the single `startup_urls` array**. There is no deprecation alias — users upgrading from v1.0.x must edit `hook.conf.toml` by hand. The `TAURI_HOOK_TARGET_URL` environment variable and the `argv[1]` URL override have also been removed in the same change (everything goes through `startup_urls` now).
 >
-> **Format break in v1.1.4**: the user-config file moved from `hook.config.json` to `hook.conf.toml`. The schema is unchanged — the new TOML sample carries inline `#` comments that JSON could not. Pouch logs a one-line WARN at startup if it still finds a legacy `hook.config.json` in the data directory; auto-migration is intentionally not done (TOML serialisation would lose any comments the user added). Hand-port the values to the new file and remove the old one when ready.
+> **Format break in v2.0.0**: the user-config file moved from `hook.config.json` to `hook.conf.toml`. The schema is unchanged — the new TOML sample carries inline `#` comments that JSON could not. Pouch logs a one-line WARN at startup if it still finds a legacy `hook.config.json` in the data directory; auto-migration is intentionally not done (TOML serialisation would lose any comments the user added). Hand-port the values to the new file and remove the old one when ready.
 
 ### 4.2 Resolution
 

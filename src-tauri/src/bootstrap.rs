@@ -115,7 +115,7 @@ mod macos {
 
         // 1. hook.conf.toml — copy only when the destination is missing.
         //    If the user has edited or kept this file we leave it alone.
-        //    Note: a stale `hook.config.json` from a pre-v1.1.4 install may
+        //    Note: a stale `hook.config.json` from a pre-v2.0.0 install may
         //    coexist in the same directory; we deliberately do NOT delete or
         //    rewrite it (config.rs surfaces a one-line WARN pointing the user
         //    at the new filename).
