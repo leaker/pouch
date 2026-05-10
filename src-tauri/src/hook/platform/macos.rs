@@ -99,6 +99,14 @@ fn rt() -> &'static Runtime {
 /// cannot be located (i.e. WebKit's internal API has shifted). Subclass
 /// registration itself cannot fail at runtime — `define_class!` is build-time.
 pub fn install_global() -> Result<(), super::InstallError> {
+    if std::env::var_os("POUCH_DISABLE_NSURLPROTOCOL").is_some() {
+        tracing::info!(
+            target: "hook",
+            "[hook][mac] NSURLProtocol install skipped (POUCH_DISABLE_NSURLPROTOCOL set)"
+        );
+        return Ok(());
+    }
+
     static INSTALLED: OnceLock<()> = OnceLock::new();
     if INSTALLED.get().is_some() {
         return Ok(());

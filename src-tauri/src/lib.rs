@@ -32,6 +32,8 @@ pub mod dialog;
 pub mod hook;
 pub mod http_fetcher;
 pub mod inject;
+#[cfg(target_os = "macos")]
+mod mitm;
 pub mod storage;
 #[cfg(target_os = "macos")]
 mod titlebar;
@@ -341,6 +343,32 @@ pub fn run() {
             //    WKBrowsingContextController; no-op on Windows).
             hook::platform::install_global()?;
 
+            // 1c. Phase 1 MITM proxy (macOS only). Bound but **not** yet
+            //    consumed by the webview — verify with curl using
+            //    `--cacert ~/Library/Application Support/Pouch/ca/pouch-ca.pem`.
+            //    Phase 2a points the webview at this proxy via
+            //    `with_proxy_config`.
+            //
+            // 1d. Phase 2b CA-trust gate (macOS only). After `start()` has
+            //    materialised the CA on disk, prompt the user via NSAlert
+            //    if it isn't yet trusted by the login keychain and shell out
+            //    to `security add-trusted-cert` on consent. On user-decline
+            //    or install failure we show one final explanation alert and
+            //    exit — mirroring the existing "no startup URL → exit"
+            //    branches below; we use `process::exit(1)` (non-zero) so
+            //    the user / launcher can distinguish trust-required from
+            //    plain user-cancel.
+            #[cfg(target_os = "macos")]
+            {
+                if let Err(e) = mitm::start() {
+                    tracing::error!(target: "hook", "[mitm] start failed: {e}");
+                } else if let Err(e) = mitm::ensure_ca_trusted() {
+                    tracing::error!(target: "hook", "[mitm] CA trust required: {e}");
+                    mitm::show_trust_quit_alert(&e.to_string());
+                    std::process::exit(1);
+                }
+            }
+
             // 2. Scan inject/ rules. Editing files under inject/ at
             //    runtime is picked up on the next Cmd+R via a clean
             //    `app.restart()` (see [`reload_from_config`] doc /
@@ -645,6 +673,18 @@ fn create_main_window_with_url(
                 .inner_size(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT)
         }
     };
+
+    // Phase 2a: route the WKWebView's network stack through our local
+    // MITM proxy on macOS. The proxy is started during `setup` (see the
+    // `mitm::start()` call earlier in this file) and binds before any
+    // webview is created, so `proxy_port()` is guaranteed to be `Some`
+    // here. Windows webviews use WebView2's `WebResourceRequested` API
+    // natively and never go through this path — see
+    // `hook/platform/windows.rs`.
+    #[cfg(target_os = "macos")]
+    {
+        builder = mitm::apply_proxy_to_builder(builder);
+    }
 
     if let Some(js) = dispatcher {
         builder = builder.initialization_script(js);

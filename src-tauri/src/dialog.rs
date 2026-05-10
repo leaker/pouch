@@ -390,6 +390,14 @@ pub fn open_extra_window(
         }
     };
 
+    // Phase 2a: route this extra window's WKWebView through the local
+    // MITM proxy on macOS. Mirrors `lib.rs::create_main_window_with_url`
+    // — see that comment for the rationale and Windows-path note.
+    #[cfg(target_os = "macos")]
+    {
+        builder = crate::mitm::apply_proxy_to_builder(builder);
+    }
+
     let window = builder.build()?;
     tracing::debug!(
         target: "hook",

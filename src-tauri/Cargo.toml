@@ -18,7 +18,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2.6.1", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["devtools"] }
+tauri = { version = "2", features = ["devtools", "macos-proxy"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["fs", "sync", "io-util", "macros", "rt-multi-thread"] }
@@ -76,6 +76,34 @@ block2 = "0.6"
 # the main thread (`DispatchQueue::main().exec_async(...)`). Pinned to the same
 # version wry transitively pulls in (see `cargo tree | grep dispatch2`).
 dispatch2 = "0.3"
+# Phase 1 MITM proxy (mitm/ module). hudsucker = HTTP/S MITM core (CONNECT
+# parsing + per-host leaf cert generation via rcgen). `full` enables
+# decoder + http2 + rcgen-ca + rustls-client + native-tls-client + openssl-ca;
+# we only need the rustls + rcgen + http2 set, but the binary-size cost of the
+# extras is irrelevant at this scale and `full` keeps the dep declaration
+# self-explanatory. macOS-only — Windows uses WebView2's WebResourceRequested
+# API natively (see hook/platform/windows.rs).
+hudsucker = { version = "0.24", features = ["full"] }
+rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
+# The aws_lc_rs CryptoProvider feature must be enabled on rustls so we can
+# call `rustls::crypto::aws_lc_rs::default_provider()`. Cargo unifies features
+# across the dep tree, but reqwest still configures its own ring-based
+# provider per-client, so the two coexist without conflict.
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
+# Promote three transitive deps of `hudsucker` (already in the lockfile via the
+# `full` feature) to direct deps so we can build a custom native-tls upstream
+# connector that works around hudsucker 0.24.1's `with_native_tls_connector()`
+# bug — that builder calls `HttpConnector::new()` without `enforce_http(false)`,
+# so every https URL is rejected by the inner http connector with "invalid URL,
+# scheme is not http". Versions pinned to whatever hudsucker `full` already
+# resolved (Cargo.lock); this only changes which crate "owns" the edge in the
+# dep graph, no extra compilation. Using the OS-native TLS stack lets us reach
+# legacy game / WebSocket endpoints whose TLS configuration rustls (with its
+# stricter defaults) refuses.
+hyper-tls = "0.6"
+hyper-util = { version = "0.1", features = ["client-legacy"] }
+native-tls = "0.2"
+tokio-native-tls = "0.3"
 
 [dev-dependencies]
 mockito = "1"
