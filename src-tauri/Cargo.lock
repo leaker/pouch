@@ -1667,7 +1667,6 @@ dependencies = [
  "hyper-tungstenite",
  "hyper-util",
  "moka",
- "openssl",
  "rand 0.10.1",
  "rcgen",
  "thiserror 2.0.18",

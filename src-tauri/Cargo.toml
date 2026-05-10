@@ -78,13 +78,22 @@ objc2-app-kit = { version = "0.3", features = [
     "NSLayoutConstraint",
 ] }
 # MITM proxy (mitm/ module). hudsucker = HTTP/S MITM core (CONNECT
-# parsing + per-host leaf cert generation via rcgen). `full` enables
-# decoder + http2 + rcgen-ca + rustls-client + native-tls-client + openssl-ca;
-# we only need the rustls + rcgen + http2 set, but the binary-size cost of the
-# extras is irrelevant at this scale and `full` keeps the dep declaration
-# self-explanatory. macOS-only — Windows uses WebView2's WebResourceRequested
-# API natively (see hook/platform/windows.rs).
-hudsucker = { version = "0.24", features = ["full"] }
+# parsing + per-host leaf cert generation via rcgen). We explicitly pick
+# `decoder + http2 + native-tls-client + rcgen-ca + rustls-client` instead of
+# the `full` feature because `full` also enables `openssl-ca`, which pulls in
+# `openssl-sys` / system openssl. That breaks the universal-apple-darwin CI
+# build: cross-compiling x86_64-apple-darwin from an aarch64-apple-darwin host
+# fails openssl pkg-config probing ($HOST != $TARGET). pouch signs the CA via
+# rcgen and never uses hudsucker's openssl-ca path, so the openssl dep is dead
+# code. macOS-only — Windows uses WebView2's WebResourceRequested API natively
+# (see hook/platform/windows.rs).
+hudsucker = { version = "0.24", default-features = false, features = [
+    "decoder",
+    "http2",
+    "native-tls-client",
+    "rcgen-ca",
+    "rustls-client",
+] }
 rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
 # The aws_lc_rs CryptoProvider feature must be enabled on rustls so we can
 # call `rustls::crypto::aws_lc_rs::default_provider()`. Cargo unifies features
