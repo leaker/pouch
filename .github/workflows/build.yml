@@ -340,8 +340,9 @@ jobs:
   # bundler runs is what we copy out for the portable artifacts -- tauri
   # build is just cargo build + bundler, so the unsigned exe is still there.
   #
-  # `args: --bundles app,msi` tells tauri to skip NSIS even though it's
-  # technically a valid target -- we only ship MSI.
+  # `args: --bundles msi` tells tauri to skip NSIS even though it's
+  # technically a valid target -- we only ship MSI. (Windows `--bundles`
+  # only accepts `msi` and `nsis`; `app` is a macOS-only value.)
   #
   # Two modes, gated by the trigger:
   #   - main / PR  -> fast `cargo check` smoke test only.
@@ -380,16 +381,16 @@ jobs:
       # pair is what makes the bundler create the .sig file alongside the
       # .msi.zip -- without it we'd still get an MSI but no updater feed.
       #
-      # Bundle targets are restricted to `app,msi` (no NSIS) per Pouch's
-      # release matrix decision. `app` is required because tauri's MSI
-      # template packages the .app subdirectory's contents into the
-      # installer payload.
+      # Bundle target is restricted to `msi` (no NSIS) per Pouch's release
+      # matrix decision. On Windows, tauri's `--bundles` flag only accepts
+      # `msi` and `nsis` -- `app` is a macOS-only value and passing it
+      # here trips a CLI validation error before the build starts.
       # ----------------------------------------------------------------------
       - name: Build Tauri app (Windows MSI + updater)
         if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         uses: tauri-apps/tauri-action@v0
         with:
-          args: --bundles app,msi
+          args: --bundles msi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
