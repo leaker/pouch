@@ -28,14 +28,31 @@
                  InstallScope="perUser"
                  SummaryCodepage="!(loc.TauriCodepage)"/>
 
-        <!-- Per-user install signaling. WiX/candle rejects Value="" on
-             <Property> with IllegalEmptyAttributeValue, so we set ALLUSERS
-             without a Value attribute (matches WiX 3's own PerUserMsi test
-             fixture) and pair it with MSIINSTALLPERUSER=1 for Windows
-             Installer 5+ single-package authoring. Together with
-             InstallScope="perUser" above, this forces a per-user MSI. -->
-        <Property Id="ALLUSERS" Secure="yes"/>
-        <Property Id="MSIINSTALLPERUSER" Value="1"/>
+        <!-- Single-package authoring (https://learn.microsoft.com/en-us/windows/win32/msi/single-package-authoring).
+             ALLUSERS=2 + MSIINSTALLPERUSER=1 tells Windows Installer 5+ to
+             decide perUser vs perMachine at install time based on the
+             invoker's privileges, while keeping the Directory tree rooted
+             at ProgramFilesFolder so the linker's ICE38/ICE43 checks
+             (which would otherwise reject our File-KeyPath Components
+             when rooted under LocalAppDataFolder) stay green.
+
+             A "pure" perUser install with a LocalAppDataFolder-rooted
+             Directory tree fails light.exe with ICE38 ("Component
+             installs to user profile. It must use a registry key under
+             HKCU as its KeyPath, not a file.") for both the main binary
+             Component and every Component emitted by Tauri for entries
+             under `bundle.resources` — and we can't rewrite those, since
+             tauri-bundler generates them. Tracked upstream as
+             https://github.com/tauri-apps/tauri/issues/13792 ;
+             tchap-desktop's PR #180 ships exactly this dual-purpose
+             setup as a workaround.
+
+             Net effect: on a standard user account, the MSI installs to
+             %LOCALAPPDATA%\Programs\Pouch\ with no UAC prompt. On an
+             admin-elevated invocation it falls back to per-machine in
+             Program Files. -->
+        <Property Id="ALLUSERS" Secure="yes" Value="2"/>
+        <Property Id="MSIINSTALLPERUSER" Secure="yes" Value="1"/>
 
         <!-- https://docs.microsoft.com/en-us/windows/win32/msi/reinstallmode -->
         <!-- reinstall all files; rewrite all registry entries; reinstall all shortcuts -->
@@ -127,10 +144,14 @@
                     <RegistryValue Root="HKCU" Key="Software\\{{manufacturer}}\\{{product_name}}" Name="Desktop Shortcut" Type="integer" Value="1" KeyPath="yes" />
                 </Component>
             </Directory>
-            <Directory Id="LocalAppDataFolder" Name="AppData">
-                <Directory Id="ProgramsFolder" Name="Programs">
-                    <Directory Id="INSTALLDIR" Name="{{product_name}}"/>
-                </Directory>
+            <!-- Keep the Directory tree rooted at ProgramFilesFolder; the
+                 ALLUSERS=2 / MSIINSTALLPERUSER=1 pair (see Property block
+                 above) makes Windows Installer redirect this to
+                 %LocalAppData%\Programs\<product>\ at install time for
+                 unprivileged users. Rooting directly at LocalAppDataFolder
+                 here would re-trigger the ICE38 light.exe failures. -->
+            <Directory Id="$(var.PlatformProgramFilesFolder)" Name="PFiles">
+                <Directory Id="INSTALLDIR" Name="{{product_name}}"/>
             </Directory>
             <Directory Id="ProgramMenuFolder">
                 <Directory Id="ApplicationProgramsFolder" Name="{{product_name}}"/>
