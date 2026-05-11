@@ -28,6 +28,7 @@
 //! to the new filename — migration is by hand (no auto-rewrite of user data).
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
@@ -74,7 +75,53 @@ struct ConfigFile {
     /// startup; missing/empty all mean "no filtering".
     #[serde(default)]
     ignore_urls: Option<Vec<IgnoreEntry>>,
+    /// Optional `[updater]` section. Missing/empty all mean "use defaults"
+    /// — see [`UpdaterConfig`]. Independent of `startup_urls` /
+    /// `window_dimensions` so users can drop it in piecemeal.
+    #[serde(default)]
+    updater: Option<UpdaterConfig>,
 }
+
+/// `[updater]` section of `hook.conf.toml`. Only one user-facing knob today
+/// (auto_check); separated from the runtime [`Config`] because the updater
+/// module reads its value via a process-global atomic — see
+/// [`is_updater_auto_check_enabled`] — rather than threading the value
+/// through every call site.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy)]
+#[serde(deny_unknown_fields)]
+pub struct UpdaterConfig {
+    /// When true (default), Pouch fires a silent check ~5s after startup
+    /// (see `updater::check_silent`). When false, only the interactive
+    /// "Check for Updates…" menu entry triggers a check. The pubkey and
+    /// endpoint that govern *whether* an update is trusted live in
+    /// `tauri.conf.json -> plugins.updater`; this field controls only the
+    /// "do we look at all" question.
+    #[serde(default = "default_auto_check")]
+    pub auto_check: bool,
+}
+
+fn default_auto_check() -> bool {
+    true
+}
+
+impl Default for UpdaterConfig {
+    fn default() -> Self {
+        Self {
+            auto_check: default_auto_check(),
+        }
+    }
+}
+
+/// Process-wide cached value of `[updater] auto_check`. Set by [`load`]
+/// after parsing the active `hook.conf.toml` and read by
+/// [`is_updater_auto_check_enabled`] from the `updater::check_silent`
+/// startup task. Defaults to `true` so an unloaded config (load() never
+/// called, or the file vanished mid-flight) errs on the side of "check".
+///
+/// `AtomicBool` rather than `OnceLock<bool>` so a future runtime-Reload
+/// path (Cmd+R restarts the process today, but a hot-reload variant is
+/// plausible) can update the flag in place without rebuilding the cell.
+static UPDATER_AUTO_CHECK: AtomicBool = AtomicBool::new(true);
 
 /// Initial window dimensions. VSCode-style naming: the string variants mirror
 /// VSCode's `window.newWindowDimensions` semantics for clarity.
@@ -188,6 +235,14 @@ fn from_config_file() -> (Vec<String>, WindowDimensions) {
                         crate::hook::ignore_filter::set_matchers(&[]);
                     }
 
+                    // Install the `[updater]` section's `auto_check`
+                    // flag into the process-global atomic so
+                    // `updater::check_silent` can read it without taking
+                    // a reference to the resolved Config. Missing whole
+                    // section → leave at default (true).
+                    let updater_cfg = parsed.updater.unwrap_or_default();
+                    UPDATER_AUTO_CHECK.store(updater_cfg.auto_check, Ordering::Relaxed);
+
                     // First parse-success wins for window_dimensions /
                     // startup_urls — matches the old "first hit wins"
                     // behaviour when multiple candidate paths exist. Adopt
@@ -292,6 +347,14 @@ fn warn_if_legacy_json_present() {
             return; // one warn is enough
         }
     }
+}
+
+/// Returns the cached value of `[updater] auto_check`. Reads the
+/// process-global atomic set by [`load`]; safe to call from any thread.
+/// If `load` has not yet run (i.e. called before `setup` for some reason),
+/// returns `true` so the updater errs on the side of checking.
+pub fn is_updater_auto_check_enabled() -> bool {
+    UPDATER_AUTO_CHECK.load(Ordering::Relaxed)
 }
 
 #[cfg(test)]
@@ -408,6 +471,45 @@ mod tests {
             WindowDimensions::default(),
             WindowDimensions::Mode(WindowDimensionsMode::Inherit)
         ));
+    }
+
+    #[test]
+    fn updater_config_defaults_auto_check_true() {
+        // Bare `[updater]` table with no fields → auto_check defaults to true.
+        let parsed: ConfigFile = toml::from_str("[updater]\n").unwrap();
+        let u = parsed.updater.expect("updater section present");
+        assert!(u.auto_check, "default for auto_check should be true");
+    }
+
+    #[test]
+    fn updater_config_explicit_false_disables() {
+        let parsed: ConfigFile =
+            toml::from_str("[updater]\nauto_check = false\n").unwrap();
+        let u = parsed.updater.expect("updater section present");
+        assert!(!u.auto_check);
+    }
+
+    #[test]
+    fn updater_config_missing_section_is_none() {
+        // No [updater] table at all → parsed.updater is None; the caller
+        // falls back to UpdaterConfig::default(), which has auto_check = true.
+        let parsed: ConfigFile = toml::from_str("").unwrap();
+        assert!(parsed.updater.is_none());
+        assert!(UpdaterConfig::default().auto_check);
+    }
+
+    #[test]
+    fn updater_config_rejects_unknown_keys() {
+        // `deny_unknown_fields` keeps the schema honest — typos in field
+        // names should error at load time instead of silently ignoring
+        // user intent (e.g. `auto-check` with a hyphen).
+        let err =
+            toml::from_str::<ConfigFile>("[updater]\nauto-check = false\n").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("auto-check") || msg.contains("unknown"),
+            "expected unknown-field error mentioning the bad key, got: {msg}"
+        );
     }
 
     #[test]

@@ -114,3 +114,27 @@ ignore_urls = [
   # Example: full-URL regex, caller controls anchors
   { url_regex = '^https:\/\/www\.leelib\.com(?:\/[^\/\.]+)*\/?$' },
 ]
+
+# -----------------------------------------------------------------------------
+# [updater]: controls Pouch's built-in auto-update check.
+# -----------------------------------------------------------------------------
+# Pouch can check GitHub Releases for a newer signed build and prompt you to
+# install it. The check is gated by build layout:
+#
+#   - macOS .app installed under /Applications/ (or ~/Applications/) and the
+#     Windows MSI installed under Program Files\Pouch\ (or
+#     %LOCALAPPDATA%\Programs\Pouch\) → auto-update is fully wired.
+#   - cargo dev builds, portable .exe runs, and scoop installs → "Check for
+#     Updates…" shows a notice pointing at the releases page; the silent
+#     post-startup check bails.
+#
+# The signing public key and update endpoint are baked into the build (see
+# tauri.conf.json -> plugins.updater); the only user-facing knob is the
+# auto_check flag below.
+[updater]
+# When true, Pouch quietly checks for a new release about 5 seconds after
+# startup and only shows a prompt if a newer version is available. Set to
+# false if you'd rather control updates manually via the "Check for
+# Updates…" menu item (always available regardless of this setting).
+auto_check = true
+

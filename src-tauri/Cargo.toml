@@ -19,6 +19,18 @@ tauri-build = { version = "2.6.1", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = ["devtools", "macos-proxy"] }
+# Tauri v2 updater — silent post-startup check + interactive "Check for
+# Updates…" menu entry. Wired in `src/updater.rs`; configured via
+# `tauri.conf.json -> plugins.updater` (endpoints + pubkey). Desktop-only
+# (the updater is a no-op on iOS/Android), so the target cfg matches what
+# the plugin's own README recommends.
+tauri-plugin-updater = "2"
+# Cross-platform message-dialog plugin. Used by the updater interactive
+# path (the existing macOS-only NSAlert in `src/dialog.rs` is for the
+# "type a URL" text-input prompt, which the updater never needs); using
+# the plugin here gives us a native dialog on Windows too without
+# duplicating `dialog.rs`'s objc2 dance for a one-shot OK/Cancel.
+tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # User-config file format (`hook.conf.toml`). Already in the lockfile via

@@ -39,6 +39,7 @@ mod mitm;
 pub mod storage;
 #[cfg(target_os = "macos")]
 mod titlebar;
+pub mod updater;
 pub mod util;
 
 #[cfg(target_os = "macos")]
@@ -60,6 +61,17 @@ use tracing_subscriber::{fmt::time::ChronoLocal, EnvFilter};
 /// Menu item id for the "Open DevTools" entry. Matched in `on_menu_event` to
 /// dispatch into [`tauri::WebviewWindow::open_devtools`].
 const MENU_ID_OPEN_DEVTOOLS: &str = "pouch.open_devtools";
+
+/// Menu item id for the "Check for Updates…" entry. Placed in the macOS App
+/// menu right after About (matches Apple HIG) and in the Windows View
+/// submenu (the only cross-platform submenu Pouch currently builds — see
+/// the `.menu(|handle| ...)` builder below). On click, dispatches into
+/// [`updater::check_interactive`] which always shows a dialog regardless of
+/// result. Cross-platform — auto-update is only wired for the macOS .app
+/// and the Windows MSI, but the menu entry itself exists on both and the
+/// interactive handler shows a release-page notice on non-installed
+/// layouts (cargo dev / portable .exe / scoop).
+const MENU_ID_CHECK_FOR_UPDATES: &str = "pouch.check_for_updates";
 
 /// Placeholder title shown while a navigation is in flight. Set
 /// immediately after `build()` (see main + extra window paths) and
@@ -105,6 +117,19 @@ pub fn run() {
     install_panic_hook();
 
     let build_result = tauri::Builder::default()
+        // Updater plugin — registered before the menu / setup hooks so
+        // `app.updater()` is available by the time the silent check task
+        // (spawned in `setup`) wakes up. Configured via
+        // `tauri.conf.json -> plugins.updater` and gated by the
+        // `hook.conf.toml -> [updater]` section read inside
+        // `updater::check_silent`.
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        // Cross-platform message dialogs. Used today only by the
+        // `updater` module's interactive / error paths; the existing
+        // hand-rolled NSAlert in `dialog.rs` (text-input prompt) is
+        // macOS-only and still preferred there for the comboboxed URL
+        // entry — see that file's module doc for the rationale.
+        .plugin(tauri_plugin_dialog::init())
         // Standard macOS menu bar: <App> / File / Edit / View / Window.
         // F12 works on both macOS and Windows for opening DevTools
         // (matches Chrome on both platforms); the accelerator only fires
@@ -123,6 +148,17 @@ pub fn run() {
                 .accelerator("F12")
                 .build(handle)?;
 
+            // "Check for Updates…" — placed in the App submenu (right after
+            // About) on macOS per Apple HIG; on Windows there's no App
+            // submenu, so we append it to the View submenu below as the
+            // only cross-platform place Pouch currently builds. The menu
+            // entry is unconditional — `updater::check_interactive` handles
+            // dev / portable / scoop layouts by showing a release-page
+            // notice instead of failing.
+            let check_for_updates =
+                MenuItemBuilder::with_id(MENU_ID_CHECK_FOR_UPDATES, "Check for Updates\u{2026}")
+                    .build(handle)?;
+
             let view_builder = SubmenuBuilder::new(handle, "View").item(&open_devtools);
             #[cfg(target_os = "macos")]
             let view_builder = {
@@ -140,6 +176,12 @@ pub fn run() {
                     .separator()
                     .item(&reload)
             };
+            // On non-macOS, the View submenu is the only place we have to
+            // surface "Check for Updates…" — append it (after DevTools and
+            // anything else above) so users can always trigger an
+            // interactive check from the menu bar.
+            #[cfg(not(target_os = "macos"))]
+            let view_builder = view_builder.separator().item(&check_for_updates);
             let view = view_builder.build()?;
 
             let menu_builder = MenuBuilder::new(handle);
@@ -180,12 +222,19 @@ pub fn run() {
                 // automatically labels this submenu using the running
                 // process name on macOS (NSApp swaps in the bundle name),
                 // so the title we pass is just a placeholder.
+                //
+                // "Check for Updates…" is inserted directly after About
+                // (separated by a divider) per Apple HIG. macOS-only
+                // because the App submenu itself is macOS-only; the
+                // Windows path adds the same entry to the View submenu
+                // above instead.
                 let app_submenu = SubmenuBuilder::new(handle, product_name)
                     .item(&PredefinedMenuItem::about(
                         handle,
                         Some(&format!("About {product_name}")),
                         Some(about_metadata),
                     )?)
+                    .item(&check_for_updates)
                     .separator()
                     .services()
                     .separator()
@@ -307,6 +356,17 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             if event.id() == MENU_ID_NEW_WINDOW {
                 dialog::show_new_window_dialog(app);
+            }
+            // "Check for Updates…" — always reachable from the menu on
+            // both platforms. Runs on the tauri async runtime so the
+            // blocking dialog inside `prompt_and_install` is off the main
+            // thread (a hard requirement spelled out by the dialog
+            // plugin's `blocking_show` docs).
+            if event.id() == MENU_ID_CHECK_FOR_UPDATES {
+                let app_handle = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    updater::check_interactive(app_handle).await;
+                });
             }
         })
         .setup(|app| {
@@ -546,6 +606,18 @@ pub fn run() {
                     e
                 );
             }
+
+            // 5. Silent update check ~5s after startup. The 5-second sleep
+            //    keeps the check well clear of first-window paint and the
+            //    macOS MITM warm-up; the task itself is gated on
+            //    `is_installed_layout()` + `[updater] auto_check`, so dev
+            //    / portable / scoop runs are no-ops. See
+            //    `updater::check_silent` for the full bail-out chain.
+            let updater_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                updater::check_silent(updater_handle).await;
+            });
 
             Ok(())
         })
