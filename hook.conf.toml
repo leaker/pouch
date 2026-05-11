@@ -123,6 +123,8 @@ ignore_urls = [
 #
 #   - macOS .app installed under /Applications/ (or ~/Applications/) →
 #     Pouch downloads the signed update payload and restarts to apply it.
+#     The Pouch menu also has a "Check for Updates…" entry for manual
+#     on-demand checks.
 #   - Windows Scoop install (pouch.exe under <scoop root>\apps\pouch\) →
 #     dialog offers a "Copy command" button that copies
 #     `scoop update pouch` to the clipboard; Pouch never downloads or
@@ -131,7 +133,13 @@ ignore_urls = [
 #     page" button that opens the GitHub releases page in your default
 #     browser; you replace the binary manually.
 #   - cargo dev builds, and macOS .app outside an Applications directory →
-#     silent check bails; "Check for Updates…" shows a release-page notice.
+#     silent check bails; on macOS, "Check for Updates…" shows a
+#     release-page notice instead.
+#
+# Windows runs entirely in the background — there is no in-window menu
+# bar (it would sit inside the title bar and clutter the UI), so there
+# is no manual "Check for Updates…" entry on Windows. The silent
+# startup + 24h background check is the only update path on Windows.
 #
 # The signing public key and update endpoint are baked into the build
 # (see tauri.conf.json -> plugins.updater); on Windows the same
@@ -142,7 +150,12 @@ ignore_urls = [
 # after startup and again every 24 hours while the app is running; you
 # only see a prompt if a newer version is available. Setting to false
 # disables BOTH the post-startup check and the 24h re-check on every
-# supported platform — the "Check for Updates…" menu item still works
-# manually regardless of this setting.
+# supported platform.
+#
+# On macOS the "Check for Updates…" menu item still works manually
+# when auto_check is false. On Windows there is no menu, so setting
+# auto_check = false means Pouch performs NO update checks at all —
+# you'll need to visit https://github.com/leaker/pouch/releases/latest
+# yourself to grab a newer build.
 auto_check = true
 

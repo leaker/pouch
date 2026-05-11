@@ -98,13 +98,13 @@ A fully-commented default is seeded on first launch and never overwritten — op
   - `wildcard` — host glob; `*` matches one label and does not cross `.` (`{ wildcard = "*.google.com" }` matches `fonts.google.com` but not `google.com`).
   - `url_wildcard` — full-URL glob; `*` matches any characters including `/`. Anchored at both ends.
   - `url_regex` — raw regex against the full URL; you control the anchors.
-- `updater.auto_check` — whether Pouch silently checks for updates ~5 seconds after launch. Default `true`. Setting to `false` keeps the "Check for Updates…" menu item but disables the background check.
+- `updater.auto_check` — whether Pouch silently checks for updates ~5 seconds after launch and again every 24 hours. Default `true`. On macOS, setting it to `false` keeps the "Check for Updates…" menu item available for an on-demand check; on Windows there is no manual entry, so `false` means **no checks at all**.
 
 See the [sample `hook.conf.toml`](hook.conf.toml) at the project root for inline documentation on every field, including how parse failures are handled.
 
 ## Updates
 
-Pouch checks GitHub for new releases about five seconds after launch and again every 24 hours while the app is running. The check is silent — you only see a prompt if a newer version is published — and the **Check for Updates…** menu item (Pouch menu on macOS, View menu on Windows) is always available for an on-demand check.
+Pouch checks GitHub for new releases about five seconds after launch and again every 24 hours while the app is running. The check is silent — you only see a prompt if a newer version is published.
 
 You can disable both the post-startup check and the 24-hour re-check in `hook.conf.toml`:
 
@@ -113,18 +113,20 @@ You can disable both the post-startup check and the 24-hour re-check in `hook.co
 auto_check = false
 ```
 
-The **Check for Updates…** menu item still works manually when `auto_check` is off.
-
 ### macOS
 
-When you accept the prompt, Pouch downloads the signed update and restarts. Your data in `~/Library/Application Support/Pouch/` is preserved across updates.
+The Pouch menu hosts a **Check for Updates…** entry (right after About) for on-demand checks, and the entry remains available even with `auto_check = false`. When you accept the prompt, Pouch downloads the signed update and restarts. Your data in `~/Library/Application Support/Pouch/` is preserved across updates.
 
 ### Windows
 
-Pouch never downloads or installs the update for you on Windows — this avoids broken installs from interrupted downloads and keeps your portable layout intact if you've placed `pouch.exe` somewhere specific. The prompt depends on how you installed Pouch:
+Pouch runs entirely in the background on Windows — there's no menu, no manual entry point. When the silent check finds a newer release you'll see a dialog automatically:
 
 - **Scoop install** — the dialog offers a **Copy command** button that copies `scoop update pouch` to your clipboard. Paste it in PowerShell to upgrade.
 - **Portable** (single `.exe` / `.zip`) — the dialog offers an **Open release page** button that opens the GitHub releases page in your default browser, where you can download the new `Pouch-<version>.exe` or `Pouch-<version>.zip` and replace your existing copy.
+
+Pouch never downloads or installs the update for you on Windows — this avoids broken installs from interrupted downloads and keeps your portable layout intact if you've placed `pouch.exe` somewhere specific.
+
+Because there's no menu fallback on Windows, setting `auto_check = false` disables update checks entirely; in that case visit the [releases page](https://github.com/leaker/pouch/releases/latest) yourself to grab a newer build.
 
 ## Customize a site
 

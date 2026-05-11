@@ -43,9 +43,8 @@ pub mod updater;
 pub mod util;
 
 #[cfg(target_os = "macos")]
-use tauri::menu::{AboutMetadata, PredefinedMenuItem};
+use tauri::menu::{AboutMetadata, MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
 use tauri::{
-    menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder},
     webview::PageLoadEvent,
     AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent,
 };
@@ -59,20 +58,24 @@ use crate::util::{DEFAULT_WINDOW_HEIGHT, DEFAULT_WINDOW_WIDTH};
 use tracing_subscriber::{fmt::time::ChronoLocal, EnvFilter};
 
 /// Menu item id for the "Open DevTools" entry. Matched in `on_menu_event` to
-/// dispatch into [`tauri::WebviewWindow::open_devtools`].
+/// dispatch into [`tauri::WebviewWindow::open_devtools`]. macOS-only because
+/// Pouch no longer registers a window menu on Windows (it sat inside the
+/// title bar and cluttered the UI); Windows users still get DevTools via
+/// WebView2's built-in Ctrl+Shift+I shortcut, which is active whenever
+/// `.devtools(true)` is set on the `WebviewWindowBuilder`.
+#[cfg(target_os = "macos")]
 const MENU_ID_OPEN_DEVTOOLS: &str = "pouch.open_devtools";
 
-/// Menu item id for the "Check for Updates…" entry. Placed in the macOS App
-/// menu right after About (matches Apple HIG) and in the Windows View
-/// submenu (the only cross-platform submenu Pouch currently builds — see
-/// the `.menu(|handle| ...)` builder below). On click, dispatches into
-/// [`updater::check_interactive`] which always shows a dialog regardless of
-/// result. macOS does the full `tauri-plugin-updater` download-and-install
-/// dance for `.app` installs; Windows shows a soft "update available"
-/// notice (Scoop: copy `scoop update pouch`; portable: open the releases
-/// page) — Pouch never auto-downloads on Windows. Non-installed macOS
-/// layouts (cargo dev / portable .app) fall through to a release-page
-/// notice; see `updater::check_interactive` for the full branching.
+/// Menu item id for the macOS "Check for Updates…" entry, placed in the
+/// App submenu right after About (matches Apple HIG). On click, dispatches
+/// into [`updater::check_interactive`] which always shows a dialog
+/// regardless of result, running the full `tauri-plugin-updater`
+/// download-and-install dance for `.app` installs (non-installed layouts
+/// fall through to a release-page notice). macOS-only: Windows runs the
+/// silent startup + 24h background check (see `updater::check_silent`)
+/// and has no manual entry point — the absence of a window menu on
+/// Windows is intentional, see the `setup` builder comments below.
+#[cfg(target_os = "macos")]
 const MENU_ID_CHECK_FOR_UPDATES: &str = "pouch.check_for_updates";
 
 /// Placeholder title shown while a navigation is in flight. Set
@@ -149,173 +152,153 @@ pub fn run() {
     #[cfg(target_os = "windows")]
     let builder = builder.plugin(tauri_plugin_clipboard_manager::init());
 
-    let build_result = builder
-        // Standard macOS menu bar: <App> / File / Edit / View / Window.
-        // F12 works on both macOS and Windows for opening DevTools
-        // (matches Chrome on both platforms); the accelerator only fires
-        // while pouch has focus, so it never fights the host IDE's
-        // bindings — which is exactly why we don't reach for
-        // `tauri-plugin-global-shortcut`.
-        //
-        // On non-macOS we keep the slim historical View-only bar: every
-        // companion entry (New Window's NSAlert prompt, Reveal Folder,
-        // Reload-from-Config's titlebar pairing) is macOS-only by design
-        // — see the `MENU_ID_*` doc comments above. There's nothing to
-        // gain by erecting empty File / Edit / Window submenus on
-        // Windows; the OS supplies window controls via the system menu.
+    // macOS-only: register the standard <App>/File/Edit/View/Window menu
+    // bar. macOS users expect a native system menu bar (it lives at the
+    // top of the screen, not inside the window), so registering it costs
+    // nothing UI-wise and gives us the App submenu / Cmd+Q / Cmd+H /
+    // Cmd+W / copy-paste / window-list-in-Window-menu chrome that Apple
+    // HIG users rely on. The slot also hosts "Check for Updates…" (right
+    // after About per HIG), "Reveal Pouch Folder", "Reload from Config",
+    // "New Window", and the F12 / DevTools toggle.
+    //
+    // Windows deliberately gets NO `.menu(...)` registration: Tauri puts
+    // the window menu *inside* the title bar on Windows, which clutters
+    // the otherwise-clean Pouch UI and conflicts with the upstream
+    // page's chrome. Side effect: the "Check for Updates…" manual entry
+    // is unreachable on Windows — the silent startup + 24h background
+    // check in `setup` is the only update path, and it prompts
+    // automatically when a newer release is published (see
+    // `updater::check_silent_windows` / `prompt_windows_update`).
+    // DevTools on Windows remain reachable via WebView2's built-in
+    // Ctrl+Shift+I shortcut, active because every `WebviewWindowBuilder`
+    // sets `.devtools(true)`.
+    //
+    // `Builder::menu` and `Builder::on_menu_event` both return `Self`
+    // (Tauri v2 builder pattern), so cfg-gating the chain keeps the
+    // builder type identical on both platforms.
+    #[cfg(target_os = "macos")]
+    let builder = builder
         .menu(|handle| {
             let open_devtools = MenuItemBuilder::with_id(MENU_ID_OPEN_DEVTOOLS, "Open DevTools")
                 .accelerator("F12")
                 .build(handle)?;
 
-            // "Check for Updates…" — placed in the App submenu (right after
-            // About) on macOS per Apple HIG; on Windows there's no App
-            // submenu, so we append it to the View submenu below as the
-            // only cross-platform place Pouch currently builds. The menu
-            // entry is unconditional — `updater::check_interactive` handles
-            // dev / portable / scoop layouts by showing a release-page
-            // notice instead of failing.
+            // "Check for Updates…" — placed in the App submenu right
+            // after About per Apple HIG. Dispatches to
+            // `updater::check_interactive`, which handles dev / portable
+            // / installed-.app layouts (the latter runs the full
+            // tauri-plugin-updater download-and-install flow; the others
+            // surface a release-page notice instead of failing).
             let check_for_updates =
                 MenuItemBuilder::with_id(MENU_ID_CHECK_FOR_UPDATES, "Check for Updates\u{2026}")
                     .build(handle)?;
 
-            let view_builder = SubmenuBuilder::new(handle, "View").item(&open_devtools);
-            #[cfg(target_os = "macos")]
-            let view_builder = {
-                let reveal_folder = MenuItemBuilder::with_id(
-                    MENU_ID_REVEAL_FOLDER,
-                    "Reveal Pouch Folder in Finder",
-                )
-                .accelerator("CmdOrCtrl+Shift+O")
+            let reveal_folder = MenuItemBuilder::with_id(
+                MENU_ID_REVEAL_FOLDER,
+                "Reveal Pouch Folder in Finder",
+            )
+            .accelerator("CmdOrCtrl+Shift+O")
+            .build(handle)?;
+            let reload = MenuItemBuilder::with_id(MENU_ID_RELOAD, "Reload from Config")
+                .accelerator("CmdOrCtrl+R")
                 .build(handle)?;
-                let reload = MenuItemBuilder::with_id(MENU_ID_RELOAD, "Reload from Config")
-                    .accelerator("CmdOrCtrl+R")
-                    .build(handle)?;
-                view_builder
-                    .item(&reveal_folder)
-                    .separator()
-                    .item(&reload)
+            let view = SubmenuBuilder::new(handle, "View")
+                .item(&open_devtools)
+                .item(&reveal_folder)
+                .separator()
+                .item(&reload)
+                .build()?;
+
+            let new_window = MenuItemBuilder::with_id(MENU_ID_NEW_WINDOW, "New Window")
+                .accelerator("CmdOrCtrl+N")
+                .build(handle)?;
+
+            let pkg = handle.package_info();
+            // Display name shown in the macOS menu bar — must match the
+            // `productName` in `tauri.conf.json` ("Pouch") and the
+            // bundle name macOS displays in About / Hide / Quit, so the
+            // three menu entries read consistently. We deliberately do
+            // NOT use `pkg.name` here: that comes from Cargo's
+            // `package.name` ("pouch", lowercase per cargo convention)
+            // and would render "Hide pouch" / "Quit pouch" with a
+            // lowercase 'p' next to "About Pouch".
+            let product_name = "Pouch";
+            let about_metadata = AboutMetadata {
+                name: Some(product_name.to_string()),
+                version: Some(pkg.version.to_string()),
+                ..Default::default()
             };
-            // On non-macOS, the View submenu is the only place we have to
-            // surface "Check for Updates…" — append it (after DevTools and
-            // anything else above) so users can always trigger an
-            // interactive check from the menu bar.
-            #[cfg(not(target_os = "macos"))]
-            let view_builder = view_builder.separator().item(&check_for_updates);
-            let view = view_builder.build()?;
 
-            let menu_builder = MenuBuilder::new(handle);
-
-            // The full <App>/File/Edit/Window scaffolding is macOS-only.
-            // Tauri normally synthesises a default macOS menu when no
-            // `.menu(...)` is configured (see
-            // `Menu::default(app_handle)`); calling `.menu(...)` here
-            // *replaces* that default, so we have to ship the standard
-            // app / Edit / Window submenus ourselves to keep the macOS
-            // experience native — otherwise Cmd+Q / Cmd+H / Cmd+W /
-            // copy-paste / window-list-in-Window-menu all silently
-            // disappear from the menu bar (their key equivalents fall
-            // back to OS defaults but the visible menu UI vanishes).
-            #[cfg(target_os = "macos")]
-            let menu_builder = {
-                let new_window = MenuItemBuilder::with_id(MENU_ID_NEW_WINDOW, "New Window")
-                    .accelerator("CmdOrCtrl+N")
-                    .build(handle)?;
-
-                let pkg = handle.package_info();
-                // Display name shown in the macOS menu bar — must match the
-                // `productName` in `tauri.conf.json` ("Pouch") and the
-                // bundle name macOS displays in About / Hide / Quit, so the
-                // three menu entries read consistently. We deliberately do
-                // NOT use `pkg.name` here: that comes from Cargo's
-                // `package.name` ("pouch", lowercase per cargo convention)
-                // and would render "Hide pouch" / "Quit pouch" with a
-                // lowercase 'p' next to "About Pouch".
-                let product_name = "Pouch";
-                let about_metadata = AboutMetadata {
-                    name: Some(product_name.to_string()),
-                    version: Some(pkg.version.to_string()),
-                    ..Default::default()
-                };
-
-                // <AppName> menu — Apple HIG-standard layout. Tauri
-                // automatically labels this submenu using the running
-                // process name on macOS (NSApp swaps in the bundle name),
-                // so the title we pass is just a placeholder.
-                //
-                // "Check for Updates…" is inserted directly after About
-                // (separated by a divider) per Apple HIG. macOS-only
-                // because the App submenu itself is macOS-only; the
-                // Windows path adds the same entry to the View submenu
-                // above instead.
-                let app_submenu = SubmenuBuilder::new(handle, product_name)
-                    .item(&PredefinedMenuItem::about(
-                        handle,
-                        Some(&format!("About {product_name}")),
-                        Some(about_metadata),
-                    )?)
-                    .item(&check_for_updates)
-                    .separator()
-                    .services()
-                    .separator()
-                    .item(&PredefinedMenuItem::hide(
-                        handle,
-                        Some(&format!("Hide {product_name}")),
-                    )?)
-                    .hide_others()
-                    .show_all()
-                    .separator()
-                    .item(&PredefinedMenuItem::quit(
-                        handle,
-                        Some(&format!("Quit {product_name}")),
-                    )?)
-                    .build()?;
-
-                let file = SubmenuBuilder::new(handle, "File")
-                    .item(&new_window)
-                    .separator()
-                    .close_window()
-                    .build()?;
-
-                let edit = SubmenuBuilder::new(handle, "Edit")
-                    .cut()
-                    .copy()
-                    .paste()
-                    .separator()
-                    .select_all()
-                    .build()?;
-
-                // Tagging this submenu with `WINDOW_SUBMENU_ID` is the
-                // key step that hands ownership to NSApp: Tauri's
-                // `init_app_menu` (see tauri/src/app.rs) looks up this
-                // id and calls `set_as_windows_menu_for_nsapp()`, which
-                // in turn makes macOS auto-populate the running window
-                // list (with `Cmd+`` cycling and a checkmark on the
-                // focused window) and append items like "Bring All to
-                // Front" — none of which we have to track ourselves.
-                let window = SubmenuBuilder::with_id(
+            // <AppName> menu — Apple HIG-standard layout. Tauri
+            // automatically labels this submenu using the running
+            // process name on macOS (NSApp swaps in the bundle name),
+            // so the title we pass is just a placeholder.
+            //
+            // "Check for Updates…" is inserted directly after About
+            // (separated by a divider) per Apple HIG.
+            let app_submenu = SubmenuBuilder::new(handle, product_name)
+                .item(&PredefinedMenuItem::about(
                     handle,
-                    tauri::menu::WINDOW_SUBMENU_ID,
-                    "Window",
-                )
-                .minimize()
-                .maximize()
+                    Some(&format!("About {product_name}")),
+                    Some(about_metadata),
+                )?)
+                .item(&check_for_updates)
+                .separator()
+                .services()
+                .separator()
+                .item(&PredefinedMenuItem::hide(
+                    handle,
+                    Some(&format!("Hide {product_name}")),
+                )?)
+                .hide_others()
+                .show_all()
+                .separator()
+                .item(&PredefinedMenuItem::quit(
+                    handle,
+                    Some(&format!("Quit {product_name}")),
+                )?)
+                .build()?;
+
+            let file = SubmenuBuilder::new(handle, "File")
+                .item(&new_window)
                 .separator()
                 .close_window()
                 .build()?;
 
-                menu_builder
-                    .item(&app_submenu)
-                    .item(&file)
-                    .item(&edit)
-                    .item(&view)
-                    .item(&window)
-            };
+            let edit = SubmenuBuilder::new(handle, "Edit")
+                .cut()
+                .copy()
+                .paste()
+                .separator()
+                .select_all()
+                .build()?;
 
-            #[cfg(not(target_os = "macos"))]
-            let menu_builder = menu_builder.item(&view);
+            // Tagging this submenu with `WINDOW_SUBMENU_ID` is the
+            // key step that hands ownership to NSApp: Tauri's
+            // `init_app_menu` (see tauri/src/app.rs) looks up this
+            // id and calls `set_as_windows_menu_for_nsapp()`, which
+            // in turn makes macOS auto-populate the running window
+            // list (with `Cmd+`` cycling and a checkmark on the
+            // focused window) and append items like "Bring All to
+            // Front" — none of which we have to track ourselves.
+            let window = SubmenuBuilder::with_id(
+                handle,
+                tauri::menu::WINDOW_SUBMENU_ID,
+                "Window",
+            )
+            .minimize()
+            .maximize()
+            .separator()
+            .close_window()
+            .build()?;
 
-            menu_builder.build()
+            MenuBuilder::new(handle)
+                .item(&app_submenu)
+                .item(&file)
+                .item(&edit)
+                .item(&view)
+                .item(&window)
+                .build()
         })
         .on_menu_event(|app, event| {
             if event.id() == MENU_ID_OPEN_DEVTOOLS {
@@ -323,11 +306,7 @@ pub fn run() {
                 // titlebar button's behaviour. `is_devtools_open` and
                 // `close_devtools` require the `devtools` Cargo feature
                 // (or `debug_assertions`) on `tauri`; pouch enables
-                // `devtools` unconditionally — see Cargo.toml. Note:
-                // `close_devtools` is documented as unsupported on
-                // Windows in Tauri 2.9.5; on Windows the `else` arm is
-                // a quiet no-op, which is acceptable (parity with the
-                // upstream platform limit).
+                // `devtools` unconditionally — see Cargo.toml.
                 //
                 // Multi-window: target the **focused window** so F12 acts
                 // on whichever window the user is looking at. Falls back
@@ -350,11 +329,9 @@ pub fn run() {
                     // Mirror the new state on the titlebar accessory
                     // button so the icon stays in sync regardless of
                     // which trigger (button / F12 / menu) flipped it.
-                    #[cfg(target_os = "macos")]
                     titlebar::update_devtools_button_image(webview.label(), !was_open);
                 }
             }
-            #[cfg(target_os = "macos")]
             if event.id() == MENU_ID_REVEAL_FOLDER {
                 if let Err(e) = util::reveal_pouch_folder() {
                     tracing::warn!(
@@ -366,29 +343,29 @@ pub fn run() {
             // Reload menu / titlebar button: restart the application so
             // changes to hook.conf.toml and inject/*.js take effect on
             // the fresh launch — see `reload_from_config` doc / README §2.5.
-            #[cfg(target_os = "macos")]
             if event.id() == MENU_ID_RELOAD {
                 reload_from_config(app);
             }
             // File → New Window: pop a native NSAlert prompt for a URL
-            // and open it as an additional `WebviewWindow`. macOS-only
-            // (see `dialog.rs` for why).
-            #[cfg(target_os = "macos")]
+            // and open it as an additional `WebviewWindow`.
             if event.id() == MENU_ID_NEW_WINDOW {
                 dialog::show_new_window_dialog(app);
             }
-            // "Check for Updates…" — always reachable from the menu on
-            // both platforms. Runs on the tauri async runtime so the
-            // blocking dialog inside `prompt_and_install` is off the main
-            // thread (a hard requirement spelled out by the dialog
-            // plugin's `blocking_show` docs).
+            // "Check for Updates…" — macOS-only; Windows has no manual
+            // entry (the silent startup + 24h background check is the
+            // only update path on Windows). Runs on the tauri async
+            // runtime so the blocking dialog inside `prompt_and_install`
+            // is off the main thread (a hard requirement spelled out by
+            // the dialog plugin's `blocking_show` docs).
             if event.id() == MENU_ID_CHECK_FOR_UPDATES {
                 let app_handle = app.clone();
                 tauri::async_runtime::spawn(async move {
                     updater::check_interactive(app_handle).await;
                 });
             }
-        })
+        });
+
+    let build_result = builder
         .setup(|app| {
             // 0a. One-shot migration: v2.0.x Windows release builds stored
             //     `hook.conf.toml`, `inject/`, and `overrides/` next to
@@ -1034,6 +1011,11 @@ fn capture_window_state(window: &WebviewWindow) -> tauri::Result<WindowState> {
 /// [`AppHandle::restart`] is documented as `-> !` (never returns; the
 /// process is replaced), so no result handling is required at the call
 /// site.
+///
+/// macOS-only because both call sites (the View → Reload menu entry and
+/// the titlebar accessory's reload button) are macOS-only; Windows
+/// doesn't ship a window menu or titlebar accessory.
+#[cfg(target_os = "macos")]
 pub fn reload_from_config(app: &AppHandle) {
     tracing::info!(
         target: "hook",
@@ -1047,6 +1029,10 @@ pub fn reload_from_config(app: &AppHandle) {
 /// map and returns the first window whose `is_focused()` is `Ok(true)`.
 /// Returns `None` if no window is focused (e.g. focus is in another app)
 /// or if every `is_focused()` call errored.
+///
+/// macOS-only because today its only caller is the F12 / Open DevTools
+/// menu handler in the macOS-only `.on_menu_event(...)` block.
+#[cfg(target_os = "macos")]
 fn focused_webview_window(app: &AppHandle) -> Option<tauri::WebviewWindow> {
     app.webview_windows()
         .into_values()

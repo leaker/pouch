@@ -28,7 +28,10 @@
 //!          at the releases page.
 //!
 //! Any fetch / parse / compare failure logs at warn and silently bails —
-//! the user is never bothered by a transient network blip. The
+//! the user is never bothered by a transient network blip. Windows has
+//! no interactive entry point — the in-window menu bar is unregistered
+//! on Windows (it cluttered the title bar), so the silent startup + 24h
+//! background check is the only update path on Windows; on macOS the
 //! interactive ("Check for Updates…" menu) path additionally surfaces a
 //! "could not check" dialog on failure so the user gets feedback when
 //! they explicitly asked.
@@ -37,7 +40,9 @@
 //! the user-facing on/off switch lives in `hook.conf.toml -> [updater]`
 //! (read via [`crate::config::is_updater_auto_check_enabled`]) — the
 //! switch gates BOTH platforms: macOS skips its plugin check, Windows
-//! skips the latest.json fetch, both honoured every 24h tick.
+//! skips the latest.json fetch, both honoured every 24h tick. Note that
+//! disabling `auto_check` on Windows means **no checks at all**: there
+//! is no menu fallback to trigger one manually.
 
 use tauri::AppHandle;
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
@@ -127,16 +132,21 @@ async fn check_silent_macos(app: AppHandle) {
     }
 }
 
-/// User-invoked check (from the "Check for Updates…" menu entry). Always
-/// returns a dialog — "no update", "update available", or an error — so the
-/// user gets feedback regardless of outcome. Bypasses the `auto_check`
-/// preference because the user explicitly asked.
+/// User-invoked check (from the macOS "Check for Updates…" menu entry).
+/// Always returns a dialog — "no update", "update available", or an error
+/// — so the user gets feedback regardless of outcome. Bypasses the
+/// `auto_check` preference because the user explicitly asked.
+///
+/// macOS-only: Windows has no in-window menu bar (it sat inside the
+/// title bar and cluttered the UI), so there is no manual trigger on
+/// Windows; the silent startup + 24h background loop (see
+/// [`check_silent`]) is the only update path there, and it prompts
+/// automatically when a newer release is published.
+#[cfg(target_os = "macos")]
 pub async fn check_interactive(app: AppHandle) {
     if !is_installed_layout() {
         // Portable .app / cargo dev — no auto-update wired up for these
-        // layouts. (Windows now always reports installed-layout = true
-        // because the soft-notice path works for both scoop and portable
-        // exes.) Point users at the releases page.
+        // layouts. Point users at the releases page.
         app.dialog()
             .message(format!(
                 "This build does not support auto-update.\n\n\
@@ -148,18 +158,7 @@ pub async fn check_interactive(app: AppHandle) {
         return;
     }
 
-    #[cfg(target_os = "macos")]
-    {
-        check_interactive_macos(app).await;
-    }
-    #[cfg(target_os = "windows")]
-    {
-        check_interactive_windows(app).await;
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        let _ = app;
-    }
+    check_interactive_macos(app).await;
 }
 
 /// macOS interactive check — full plugin-driven flow. Unchanged behaviour
@@ -257,50 +256,6 @@ async fn check_silent_windows(app: AppHandle) {
         "[updater] silent check: new version v{latest} available (current v{current})"
     );
     prompt_windows_update(app, latest_version).await;
-}
-
-/// Windows interactive check. Always shows a dialog so the user has
-/// feedback even when there's no update or the check failed.
-#[cfg(target_os = "windows")]
-async fn check_interactive_windows(app: AppHandle) {
-    let Some(latest_version) = fetch_latest_version().await else {
-        app.dialog()
-            .message(format!(
-                "Could not reach GitHub to check for updates.\n\nVisit {RELEASES_URL} manually."
-            ))
-            .title("Update check failed")
-            .kind(MessageDialogKind::Error)
-            .show(|_| {});
-        return;
-    };
-    let current = parse_version(env!("CARGO_PKG_VERSION"), "current");
-    let latest = parse_version(&latest_version, "latest");
-    match (current, latest) {
-        (Some(c), Some(l)) if l > c => prompt_windows_update(app, latest_version).await,
-        (Some(c), Some(l)) => {
-            info!(
-                target: "hook",
-                "[updater] interactive check: already on latest (v{c} >= v{l})"
-            );
-            app.dialog()
-                .message("You are running the latest version of Pouch.")
-                .title("No update available")
-                .kind(MessageDialogKind::Info)
-                .show(|_| {});
-        }
-        _ => {
-            // semver parse failed on one or both sides — already logged
-            // by `parse_version`. Surface a generic failure dialog so the
-            // user knows the click registered.
-            app.dialog()
-                .message(format!(
-                    "Could not parse version info from GitHub.\n\nVisit {RELEASES_URL} manually."
-                ))
-                .title("Update check failed")
-                .kind(MessageDialogKind::Error)
-                .show(|_| {});
-        }
-    }
 }
 
 /// Helper: parse a string to `semver::Version`, log at warn on failure
