@@ -131,19 +131,23 @@ pub fn run() {
         // hand-rolled NSAlert in `dialog.rs` (text-input prompt) is
         // macOS-only and still preferred there for the comboboxed URL
         // entry — see that file's module doc for the rationale.
-        .plugin(tauri_plugin_dialog::init());
-
-    // Windows-only: clipboard + shell plugins back the "soft" update
-    // notice in `updater::prompt_windows_update`. The Scoop dialog's
-    // "Copy command" button writes `scoop update pouch` via
-    // `ClipboardExt::write_text`; the portable dialog's "Open release
-    // page" button uses `ShellExt::open` to launch the default browser.
-    // Neither plugin is registered on macOS — that path goes through
-    // `tauri-plugin-updater`'s full download-and-install flow.
-    #[cfg(target_os = "windows")]
-    let builder = builder
-        .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_dialog::init())
+        // Shell::open is used by the updater UI on both platforms:
+        //   - Windows portable "Open release page" button in
+        //     `updater::prompt_windows_update`.
+        //   - macOS "Open release page" button on the friendly
+        //     check-failed dialog in `updater::check_interactive_macos`
+        //     (rc cycle latest.json 404 fallback, etc.).
+        // Registering cross-platform keeps both paths self-contained.
         .plugin(tauri_plugin_shell::init());
+
+    // Windows-only: clipboard plugin backs the Scoop "Copy command"
+    // button in `updater::prompt_windows_update` — writes
+    // `scoop update pouch` via `ClipboardExt::write_text`. macOS never
+    // reaches that code path (it uses `tauri-plugin-updater`'s full
+    // download-and-install flow), so the plugin stays Windows-only.
+    #[cfg(target_os = "windows")]
+    let builder = builder.plugin(tauri_plugin_clipboard_manager::init());
 
     let build_result = builder
         // Standard macOS menu bar: <App> / File / Edit / View / Window.

@@ -192,12 +192,40 @@ async fn check_interactive_macos(app: AppHandle) {
                 .show(|_| {});
         }
         Err(e) => {
+            // Log the raw error for developer diagnostics but never
+            // surface it on the dialog. The common rc-cycle failure
+            // mode (`/releases/latest/download/latest.json` 404 because
+            // `/releases/latest/` skips prereleases and lands on a
+            // stable that predates the latest.json asset) yields the
+            // unhelpful "Could not fetch a valid release JSON from the
+            // remote" — soften that to a generic try-again message
+            // with an "Open release page" escape hatch.
             warn!(target: "hook", "[updater] interactive check failed: {e}");
-            app.dialog()
-                .message(format!("Could not check for updates:\n{e}"))
-                .title("Update check failed")
-                .kind(MessageDialogKind::Error)
-                .show(|_| {});
+            use tauri_plugin_shell::ShellExt;
+            let proceed = ask_dialog(
+                &app,
+                "Update check failed",
+                "Could not check for updates right now. Try again later or visit the releases page.",
+                "Open release page",
+                "OK",
+            )
+            .await;
+            if proceed {
+                // `Shell::open` is deprecated in favour of
+                // tauri-plugin-opener, but the Windows
+                // `prompt_windows_update` path above still calls it the
+                // same way — keeping both call sites consistent until
+                // we migrate both together. Silence the deprecation
+                // warning locally so `-D warnings` clippy stays green.
+                #[allow(deprecated)]
+                let open_result = app.shell().open(RELEASES_URL, None);
+                if let Err(open_err) = open_result {
+                    warn!(
+                        target: "hook",
+                        "[updater] shell open {RELEASES_URL} failed: {open_err}"
+                    );
+                }
+            }
         }
     }
 }
@@ -408,11 +436,12 @@ async fn prompt_windows_update(app: AppHandle, version: String) {
 /// We use the non-blocking variant + a `oneshot` because the silent
 /// path runs on the `tauri::async_runtime` (`tokio` underneath) and
 /// awaiting a oneshot keeps the runtime worker free during the (often
-/// minutes-long) gap before the user clicks. Used only by the Windows
-/// path; macOS sticks with `blocking_show` inside `prompt_and_install`
-/// because that flow continues straight into the synchronous
-/// `download_and_install` regardless.
-#[cfg(target_os = "windows")]
+/// minutes-long) gap before the user clicks. Used by the Windows
+/// "soft notice" flow and by the macOS interactive check-failed
+/// friendly dialog (which also offers an "Open release page" button);
+/// the macOS update-available flow sticks with `blocking_show` inside
+/// `prompt_and_install` because that path continues straight into the
+/// synchronous `download_and_install` regardless.
 async fn ask_dialog(
     app: &AppHandle,
     title: &str,
