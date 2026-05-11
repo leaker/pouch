@@ -118,23 +118,31 @@ ignore_urls = [
 # -----------------------------------------------------------------------------
 # [updater]: controls Pouch's built-in auto-update check.
 # -----------------------------------------------------------------------------
-# Pouch can check GitHub Releases for a newer signed build and prompt you to
-# install it. The check is gated by build layout:
+# Pouch can check GitHub Releases for a newer build and prompt you. The
+# follow-up depends on platform and install style:
 #
-#   - macOS .app installation under /Applications/ (or ~/Applications/) →
-#     auto-update is fully wired.
-#   - cargo dev builds, every Windows build (Pouch ships no Windows
-#     installer), and macOS .app outside an Applications directory →
-#     "Check for Updates…" shows a notice pointing at the releases page;
-#     the silent post-startup check bails.
+#   - macOS .app installed under /Applications/ (or ~/Applications/) →
+#     Pouch downloads the signed update payload and restarts to apply it.
+#   - Windows Scoop install (pouch.exe under <scoop root>\apps\pouch\) →
+#     dialog offers a "Copy command" button that copies
+#     `scoop update pouch` to the clipboard; Pouch never downloads or
+#     installs the new build itself.
+#   - Windows portable .exe / .zip → dialog offers an "Open release
+#     page" button that opens the GitHub releases page in your default
+#     browser; you replace the binary manually.
+#   - cargo dev builds, and macOS .app outside an Applications directory →
+#     silent check bails; "Check for Updates…" shows a release-page notice.
 #
-# The signing public key and update endpoint are baked into the build (see
-# tauri.conf.json -> plugins.updater); the only user-facing knob is the
-# auto_check flag below.
+# The signing public key and update endpoint are baked into the build
+# (see tauri.conf.json -> plugins.updater); on Windows the same
+# `latest.json` is fetched directly to read the `version` field for the
+# notice. The only user-facing knob is the auto_check flag below.
 [updater]
-# When true, Pouch quietly checks for a new release about 5 seconds after
-# startup and only shows a prompt if a newer version is available. Set to
-# false if you'd rather control updates manually via the "Check for
-# Updates…" menu item (always available regardless of this setting).
+# When true, Pouch quietly checks for a new release about 5 seconds
+# after startup and again every 24 hours while the app is running; you
+# only see a prompt if a newer version is available. Setting to false
+# disables BOTH the post-startup check and the 24h re-check on every
+# supported platform — the "Check for Updates…" menu item still works
+# manually regardless of this setting.
 auto_check = true
 

@@ -67,10 +67,12 @@ const MENU_ID_OPEN_DEVTOOLS: &str = "pouch.open_devtools";
 /// submenu (the only cross-platform submenu Pouch currently builds — see
 /// the `.menu(|handle| ...)` builder below). On click, dispatches into
 /// [`updater::check_interactive`] which always shows a dialog regardless of
-/// result. Auto-update is wired only for the macOS .app installed under
-/// `/Applications/`; the menu entry itself exists on both platforms and the
-/// interactive handler shows a release-page notice on Windows and on
-/// non-installed macOS layouts (cargo dev / portable runs / scoop).
+/// result. macOS does the full `tauri-plugin-updater` download-and-install
+/// dance for `.app` installs; Windows shows a soft "update available"
+/// notice (Scoop: copy `scoop update pouch`; portable: open the releases
+/// page) — Pouch never auto-downloads on Windows. Non-installed macOS
+/// layouts (cargo dev / portable .app) fall through to a release-page
+/// notice; see `updater::check_interactive` for the full branching.
 const MENU_ID_CHECK_FOR_UPDATES: &str = "pouch.check_for_updates";
 
 /// Placeholder title shown while a navigation is in flight. Set
@@ -116,7 +118,7 @@ pub fn run() {
     init_tracing();
     install_panic_hook();
 
-    let build_result = tauri::Builder::default()
+    let builder = tauri::Builder::default()
         // Updater plugin — registered before the menu / setup hooks so
         // `app.updater()` is available by the time the silent check task
         // (spawned in `setup`) wakes up. Configured via
@@ -129,7 +131,21 @@ pub fn run() {
         // hand-rolled NSAlert in `dialog.rs` (text-input prompt) is
         // macOS-only and still preferred there for the comboboxed URL
         // entry — see that file's module doc for the rationale.
-        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_dialog::init());
+
+    // Windows-only: clipboard + shell plugins back the "soft" update
+    // notice in `updater::prompt_windows_update`. The Scoop dialog's
+    // "Copy command" button writes `scoop update pouch` via
+    // `ClipboardExt::write_text`; the portable dialog's "Open release
+    // page" button uses `ShellExt::open` to launch the default browser.
+    // Neither plugin is registered on macOS — that path goes through
+    // `tauri-plugin-updater`'s full download-and-install flow.
+    #[cfg(target_os = "windows")]
+    let builder = builder
+        .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_shell::init());
+
+    let build_result = builder
         // Standard macOS menu bar: <App> / File / Edit / View / Window.
         // F12 works on both macOS and Windows for opening DevTools
         // (matches Chrome on both platforms); the accelerator only fires
@@ -607,16 +623,30 @@ pub fn run() {
                 );
             }
 
-            // 5. Silent update check ~5s after startup. The 5-second sleep
-            //    keeps the check well clear of first-window paint and the
-            //    macOS MITM warm-up; the task itself is gated on
-            //    `is_installed_layout()` + `[updater] auto_check`, so dev
-            //    / portable / scoop runs are no-ops. See
-            //    `updater::check_silent` for the full bail-out chain.
+            // 5. Silent update check ~5s after startup, then every 24h
+            //    while the app is running. The initial 5-second sleep
+            //    keeps the first check well clear of first-window paint
+            //    and the macOS MITM warm-up; the 24h tick after that
+            //    means long-lived sessions also notice fresh releases
+            //    (typical for users who park Pouch open for days).
+            //    The task itself is gated on `is_installed_layout()` +
+            //    `[updater] auto_check` *every* iteration, so toggling
+            //    `auto_check = false` in `hook.conf.toml` is honoured
+            //    without restart on the next 24h tick (and during the
+            //    initial check too). Dev / non-installed runs no-op.
+            //    See `updater::check_silent` for the full bail-out chain
+            //    and the macOS vs Windows split inside.
             let updater_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 tokio::time::sleep(Duration::from_secs(5)).await;
-                updater::check_silent(updater_handle).await;
+                loop {
+                    updater::check_silent(updater_handle.clone()).await;
+                    // 24h = 86_400 s. We don't use a richer scheduler
+                    // (cron / dispatch_after) because the precision
+                    // demanded here is "roughly once a day" — drift
+                    // from machine sleep / suspend is harmless.
+                    tokio::time::sleep(Duration::from_secs(24 * 60 * 60)).await;
+                }
             });
 
             Ok(())

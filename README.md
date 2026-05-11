@@ -104,27 +104,27 @@ See the [sample `hook.conf.toml`](hook.conf.toml) at the project root for inline
 
 ## Updates
 
-### macOS
+Pouch checks GitHub for new releases about five seconds after launch and again every 24 hours while the app is running. The check is silent — you only see a prompt if a newer version is published — and the **Check for Updates…** menu item (Pouch menu on macOS, View menu on Windows) is always available for an on-demand check.
 
-Pouch checks GitHub for new releases about five seconds after launch (silent — you only see a prompt if a newer version is published) and offers a manual **Check for Updates…** menu item in the Pouch menu (next to About).
-
-When you accept, Pouch downloads the signed update and restarts. Your data in `~/Library/Application Support/Pouch/` is preserved across updates.
-
-You can disable the silent check in `hook.conf.toml`:
+You can disable both the post-startup check and the 24-hour re-check in `hook.conf.toml`:
 
 ```toml
 [updater]
 auto_check = false
 ```
 
-The **Check for Updates…** menu item still works manually.
+The **Check for Updates…** menu item still works manually when `auto_check` is off.
+
+### macOS
+
+When you accept the prompt, Pouch downloads the signed update and restarts. Your data in `~/Library/Application Support/Pouch/` is preserved across updates.
 
 ### Windows
 
-Auto-update is **not** available on Windows — Pouch does not ship a Windows installer. Running **Check for Updates…** (View menu) shows a notice pointing to the releases page. Upgrade by:
+Pouch never downloads or installs the update for you on Windows — this avoids broken installs from interrupted downloads and keeps your portable layout intact if you've placed `pouch.exe` somewhere specific. The prompt depends on how you installed Pouch:
 
-- scoop: `scoop update pouch`
-- portable: download the new `Pouch-<version>.exe` or `Pouch-<version>.zip` from the [releases page](https://github.com/leaker/pouch/releases/latest) and replace your existing copy
+- **Scoop install** — the dialog offers a **Copy command** button that copies `scoop update pouch` to your clipboard. Paste it in PowerShell to upgrade.
+- **Portable** (single `.exe` / `.zip`) — the dialog offers an **Open release page** button that opens the GitHub releases page in your default browser, where you can download the new `Pouch-<version>.exe` or `Pouch-<version>.zip` and replace your existing copy.
 
 ## Customize a site
 

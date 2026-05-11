@@ -31,6 +31,14 @@ tauri-plugin-updater = "2"
 # the plugin here gives us a native dialog on Windows too without
 # duplicating `dialog.rs`'s objc2 dance for a one-shot OK/Cancel.
 tauri-plugin-dialog = "2"
+# Semantic version parser used by the Windows updater path
+# (`src/updater.rs`) to compare `CARGO_PKG_VERSION` against the `version`
+# field of the GitHub-hosted `latest.json` manifest. macOS goes through
+# `tauri-plugin-updater` which does its own comparison; Windows
+# intentionally bypasses that plugin (latest.json has no
+# `windows-x86_64` entry today — see updater.rs for context) and instead
+# fetches latest.json + parses + compares manually.
+semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # User-config file format (`hook.conf.toml`). Already in the lockfile via
@@ -58,6 +66,15 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 # Versions aligned with what wry / tauri 2.x already pull in via the current
 # Cargo.lock to avoid multiple-versions conflicts.
 [target.'cfg(target_os = "windows")'.dependencies]
+# Clipboard write + shell open for the Windows "soft" update notice (see
+# `src/updater.rs`):
+#   - clipboard-manager copies `scoop update pouch` for Scoop installs.
+#   - shell opens the GitHub releases page in the default browser for
+#     portable installs.
+# Both are Windows-only — macOS uses tauri-plugin-updater's full
+# download-and-install flow and never reaches these code paths.
+tauri-plugin-clipboard-manager = "2"
+tauri-plugin-shell = "2"
 webview2-com = "0.38"
 # `Win32_UI_Shell` is required for `SHCreateMemStream` (used by phase H to
 # build response IStreams from owned `Vec<u8>` bodies — see hook/platform/windows.rs).
