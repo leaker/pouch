@@ -9,7 +9,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["app", "dmg", "msi"],
+    "targets": ["app", "dmg"],
     "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
@@ -23,17 +23,6 @@
       "../inject/global.js": "sample/inject/global.js",
       "../inject/www.leelib.com/leelib.js": "sample/inject/www.leelib.com/leelib.js"
     },
-    "windows": {
-      "webviewInstallMode": {
-        "type": "embedBootstrapper",
-        "silent": false
-      },
-      "wix": {
-        "upgradeCode": "092EA9A1-C124-4556-94C6-0B55F0C3A5D6",
-        "language": ["en-US"],
-        "template": "wix/main.wxs"
-      }
-    },
     "android": {
       "debugApplicationIdSuffix": ".debug"
     }
@@ -44,10 +33,7 @@
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEZFMzA4OTY5MzA0MjRDQkMKUldTOFRFSXdhWWt3L3ZPbGRGY1ErcHdPWGNSOFVKR2E0dmlldFZYWXMwaml1OVVvaUdJaVlseEIK",
       "endpoints": [
         "https://github.com/leaker/pouch/releases/latest/download/latest.json"
-      ],
-      "windows": {
-        "installMode": "passive"
-      }
+      ]
     }
   }
 }

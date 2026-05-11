@@ -121,12 +121,12 @@ ignore_urls = [
 # Pouch can check GitHub Releases for a newer signed build and prompt you to
 # install it. The check is gated by build layout:
 #
-#   - macOS .app installed under /Applications/ (or ~/Applications/) and the
-#     Windows MSI installed under Program Files\Pouch\ (or
-#     %LOCALAPPDATA%\Programs\Pouch\) → auto-update is fully wired.
-#   - cargo dev builds, portable .exe runs, and scoop installs → "Check for
-#     Updates…" shows a notice pointing at the releases page; the silent
-#     post-startup check bails.
+#   - macOS .app installation under /Applications/ (or ~/Applications/) →
+#     auto-update is fully wired.
+#   - cargo dev builds, every Windows build (Pouch ships no Windows
+#     installer), and macOS .app outside an Applications directory →
+#     "Check for Updates…" shows a notice pointing at the releases page;
+#     the silent post-startup check bails.
 #
 # The signing public key and update endpoint are baked into the build (see
 # tauri.conf.json -> plugins.updater); the only user-facing knob is the

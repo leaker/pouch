@@ -36,7 +36,7 @@ On first launch Pouch asks to trust a local certificate so it can view and modif
 
 ### Windows — Scoop (recommended)
 
-Scoop downloads Pouch through PowerShell as a portable zip — Windows does not flag it with SmartScreen. This is the smoothest install path.
+Scoop downloads Pouch through PowerShell as a portable zip — Windows does not flag it with SmartScreen.
 
 ```pwsh
 scoop bucket add leaker https://github.com/leaker/scoop-bucket
@@ -49,27 +49,7 @@ Updating:
 scoop update pouch
 ```
 
-Scoop installs the portable `pouch.exe`. The built-in auto-update is disabled for scoop installs — `scoop update pouch` is the upgrade path.
-
-### Windows — MSI installer
-
-For users who prefer a graphical installer, or environments using Group Policy / Intune for deployment.
-
-> **Heads-up — SmartScreen warning on first install**
->
-> Pouch is not yet Authenticode-signed, so the first time you open `Pouch-<version>.msi` Windows shows:
->
-> > Windows protected your PC
-> > Microsoft Defender SmartScreen prevented an unrecognized app from starting.
->
-> Click **More info** → **Run anyway** to proceed. This warning only appears on the first install of each version; later updates installed through Pouch's built-in updater are not flagged.
-
-Download `Pouch-<version>.msi` from the [releases page](https://github.com/leaker/pouch/releases/latest) and run it. The installer:
-
-- Installs to `%LOCALAPPDATA%\Programs\Pouch\` (per-user, no UAC prompt — same convention as Chrome and VS Code), and adds a Start Menu shortcut.
-- Bundles the WebView2 Runtime bootstrapper, so older Windows machines without WebView2 install it automatically.
-- Cleanly replaces earlier MSI installs without touching your data in `%APPDATA%\Pouch\`.
-- Wires up the built-in auto-update — new releases are offered in-app, no reinstall needed.
+Scoop installs the portable `pouch.exe`. Pouch does not ship a Windows installer; `scoop update pouch` is the upgrade path.
 
 ### Direct download
 
@@ -78,13 +58,11 @@ For users without Homebrew or Scoop, grab the latest build from the [releases pa
 **Pick one to install:**
 
 - **macOS** — `Pouch-<version>.dmg` (universal binary, signed and notarized)
-- **Windows MSI** — `Pouch-<version>.msi` (per-user installer; see SmartScreen note above)
 - **Windows portable** — `Pouch-<version>.exe` (single binary, double-click to run) or `Pouch-<version>.zip` (binary plus sample `hook.conf.toml` and `inject/` folder)
 
-**Ignore these — they're used by Pouch's built-in updater:**
+**Ignore these — they're used by Pouch's built-in updater (macOS only):**
 
 - `Pouch-<version>.app.tar.gz` + `.sig` (macOS update payload)
-- `Pouch-<version>.msi.sig` (Windows update signature)
 - `latest.json` (updater channel manifest)
 
 ## First run
@@ -126,14 +104,11 @@ See the [sample `hook.conf.toml`](hook.conf.toml) at the project root for inline
 
 ## Updates
 
-### macOS app and Windows MSI
+### macOS
 
-Pouch checks GitHub for new releases about five seconds after launch (silent — you only see a prompt if a newer version is published) and offers a manual **Check for Updates…** menu item:
+Pouch checks GitHub for new releases about five seconds after launch (silent — you only see a prompt if a newer version is published) and offers a manual **Check for Updates…** menu item in the Pouch menu (next to About).
 
-- macOS: Pouch menu (next to About)
-- Windows: View menu
-
-When you accept, Pouch downloads the signed update and restarts. Your data in `~/Library/Application Support/Pouch/` (macOS) or `%APPDATA%\Pouch\` (Windows) is preserved across updates.
+When you accept, Pouch downloads the signed update and restarts. Your data in `~/Library/Application Support/Pouch/` is preserved across updates.
 
 You can disable the silent check in `hook.conf.toml`:
 
@@ -144,12 +119,12 @@ auto_check = false
 
 The **Check for Updates…** menu item still works manually.
 
-### Portable .exe and scoop installs
+### Windows
 
-Auto-update is **not** available for portable builds and scoop installs. Running **Check for Updates…** on these shows a notice pointing to the releases page. Upgrade by:
+Auto-update is **not** available on Windows — Pouch does not ship a Windows installer. Running **Check for Updates…** (View menu) shows a notice pointing to the releases page. Upgrade by:
 
-- portable: download the new `.exe` and replace
 - scoop: `scoop update pouch`
+- portable: download the new `Pouch-<version>.exe` or `Pouch-<version>.zip` from the [releases page](https://github.com/leaker/pouch/releases/latest) and replace your existing copy
 
 ## Customize a site
 
@@ -223,7 +198,6 @@ The trusted certificate stays in your Keychain — open Keychain Access, search 
 
 ### Windows
 
-- **MSI install**: Add/Remove Programs (Settings → Apps → Installed apps) → Pouch → Uninstall.
 - **Scoop**: `scoop uninstall pouch`.
 - **Portable**: delete `pouch.exe` (and the surrounding folder if you extracted the zip).
 

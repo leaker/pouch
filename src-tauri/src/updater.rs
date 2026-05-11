@@ -6,11 +6,11 @@
 //! non-`.app` invocation bypass the silent path (the interactive path
 //! shows a release-page notice).
 //!
-//! Behaviour on Windows: works for the MSI-installed `pouch.exe` under
-//! `Program Files\Pouch\` or `%LOCALAPPDATA%\Programs\Pouch\`. Portable
-//! `.exe` runs and scoop installs do NOT support auto-update — the
-//! interactive "Check for Updates…" menu item shows a notice pointing at
-//! the GitHub Releases page in that case, and the silent path bails.
+//! Behaviour on Windows: no installer ships, so auto-update is not wired
+//! up. The silent post-startup check no-ops; the interactive "Check for
+//! Updates…" menu entry shows a notice pointing at the GitHub Releases
+//! page. Windows upgrades go through `scoop update pouch` or by replacing
+//! the portable `.exe` / `.zip`.
 //!
 //! The endpoint + signing pubkey live in `tauri.conf.json -> plugins.updater`;
 //! the user-facing on/off switch lives in `hook.conf.toml -> [updater]`
@@ -220,16 +220,10 @@ fn is_installed_layout() -> bool {
 
 #[cfg(target_os = "windows")]
 fn is_installed_layout() -> bool {
-    if cfg!(debug_assertions) {
-        return false;
-    }
-    let Ok(exe) = std::env::current_exe() else {
-        return false;
-    };
-    // Case-insensitive substring match — Windows paths are case-preserving
-    // but case-insensitive at the filesystem layer.
-    let p = exe.to_string_lossy().to_lowercase();
-    p.contains("\\program files\\pouch") || p.contains("\\appdata\\local\\programs\\pouch")
+    // No Windows installer is shipped; updater is macOS-only. Returning
+    // false here makes the silent check no-op and routes the interactive
+    // menu entry to the release-page notice.
+    false
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]

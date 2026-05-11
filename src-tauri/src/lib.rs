@@ -67,10 +67,10 @@ const MENU_ID_OPEN_DEVTOOLS: &str = "pouch.open_devtools";
 /// submenu (the only cross-platform submenu Pouch currently builds — see
 /// the `.menu(|handle| ...)` builder below). On click, dispatches into
 /// [`updater::check_interactive`] which always shows a dialog regardless of
-/// result. Cross-platform — auto-update is only wired for the macOS .app
-/// and the Windows MSI, but the menu entry itself exists on both and the
-/// interactive handler shows a release-page notice on non-installed
-/// layouts (cargo dev / portable .exe / scoop).
+/// result. Auto-update is wired only for the macOS .app installed under
+/// `/Applications/`; the menu entry itself exists on both platforms and the
+/// interactive handler shows a release-page notice on Windows and on
+/// non-installed macOS layouts (cargo dev / portable runs / scoop).
 const MENU_ID_CHECK_FOR_UPDATES: &str = "pouch.check_for_updates";
 
 /// Placeholder title shown while a navigation is in flight. Set
@@ -373,9 +373,9 @@ pub fn run() {
             // 0a. One-shot migration: v2.0.x Windows release builds stored
             //     `hook.conf.toml`, `inject/`, and `overrides/` next to
             //     `pouch.exe`. v2.1.0 moves them to `%APPDATA%\Pouch\` so
-            //     user data survives scoop / MSI upgrades. Runs once
-            //     (guarded by a `.migrated-from-portable` marker file) and
-            //     is a no-op on macOS / dev builds.
+            //     user data survives scoop upgrades. Runs once (guarded by
+            //     a `.migrated-from-portable` marker file) and is a no-op
+            //     on macOS / dev builds.
             migrate::migrate_legacy_windows_data();
 
             // 0b. First-run bootstrap: on macOS prod the user-data

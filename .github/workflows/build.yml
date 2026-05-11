@@ -330,32 +330,21 @@ jobs:
           retention-days: 7
 
   # ---------------------------------------------------------------------------
-  # Windows build: MSI installer (with embedded WebView2 bootstrapper) for
-  # auto-updating users via the Tauri updater, plus the legacy portable .exe
-  # and self-contained .zip that the Scoop bucket consumes.
-  #
-  # We use tauri-action so the bundler produces the MSI and its minisign
-  # signature (`*.msi` + `*.msi.sig`) that the in-app updater pulls down on
-  # Windows. Tauri v2 signs the MSI binary directly -- it does NOT wrap it
-  # in a zip the way v1 did (that legacy `.msi.zip` layout is only emitted
-  # when `plugins.updater.windows.installerArgs` opt-in `v1Compatible` is
-  # set, which we do not use). The raw `pouch.exe` left in `target/release/`
-  # after the bundler runs is what we copy out for the portable artifacts --
-  # tauri build is just cargo build + bundler, so the unsigned exe is still
-  # there.
-  #
-  # `args: --bundles msi` tells tauri to skip NSIS even though it's
-  # technically a valid target -- we only ship MSI. (Windows `--bundles`
-  # only accepts `msi` and `nsis`; `app` is a macOS-only value.)
+  # Windows build: portable .exe + zipped sample bundle, NO installer.
+  # We bypass `tauri build` and call cargo directly because the only thing we
+  # want from the Tauri toolchain on Windows is the linked binary -- no
+  # WiX/NSIS bundling, no signing, no install metadata. Windows users install
+  # Pouch through Scoop or by downloading the portable .exe / .zip; auto-
+  # update is macOS-only (see updater.rs).
   #
   # Two modes, gated by the trigger:
-  #   - main / PR  -> fast `cargo check` smoke test only.
-  #   - v* tag / workflow_dispatch -> full release path: tauri-action build
-  #                   (MSI + updater + raw exe), stage portable .exe + .zip
-  #                   alongside the MSI + updater artifacts, upload all.
+  #   - main / PR  -> fast `cargo check` smoke test only (no release build,
+  #                   no zip staging, no upload).
+  #   - v* tag / workflow_dispatch -> full release path: `cargo build
+  #                   --release`, stage portable .exe + .zip, upload.
   # ---------------------------------------------------------------------------
   build-windows:
-    name: Build Windows (MSI + portable .exe + .zip)
+    name: Build Windows (portable .exe + .zip)
     runs-on: windows-latest
 
     steps:
@@ -380,40 +369,14 @@ jobs:
         run: cargo check --locked
 
       # ----------------------------------------------------------------------
-      # Build via tauri-action so bundler emits the MSI and its updater
-      # signature (`*.msi` + `*.msi.sig`). The TAURI_SIGNING_* env pair is
-      # what makes the bundler create the .sig file alongside the .msi --
-      # without it we'd still get an MSI but no updater feed.
-      #
-      # Bundle target is restricted to `msi` (no NSIS) per Pouch's release
-      # matrix decision. On Windows, tauri's `--bundles` flag only accepts
-      # `msi` and `nsis` -- `app` is a macOS-only value and passing it
-      # here trips a CLI validation error before the build starts.
+      # Build the binary directly with cargo. The Tauri runtime bits compile
+      # the same way they would under `tauri build`; we just skip the
+      # bundler. cwd is `src-tauri/` because that's where Cargo.toml lives.
       # ----------------------------------------------------------------------
-      - name: Build Tauri app (Windows MSI + updater)
+      - name: Cargo build (release)
         if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
-        uses: tauri-apps/tauri-action@v0
-        with:
-          args: --bundles msi
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-
-      # ----------------------------------------------------------------------
-      # Debug: dump the bundler output tree so the first CI run records the
-      # exact updater artifact filenames Tauri v2 produced on Windows. The
-      # expected layout under src-tauri/target/release/bundle/ is:
-      #   msi/Pouch_<version>_x64_en-US.msi
-      #   msi/Pouch_<version>_x64_en-US.msi.sig
-      # If tauri-action ever changes this, the staging step below will
-      # fail loudly and this listing tells us the new names.
-      # ----------------------------------------------------------------------
-      - name: List Windows bundler output (debug)
-        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
-        shell: pwsh
-        run: |
-          Get-ChildItem -Recurse src-tauri/target/release/bundle | Select-Object FullName, Length
+        working-directory: src-tauri
+        run: cargo build --release
 
       # ----------------------------------------------------------------------
       # Stage the artifacts. PowerShell because Windows runners default to it
@@ -425,17 +388,11 @@ jobs:
       # ref name (which has no leading `v` to strip).
       #
       # Layout produced inside ./artifacts:
-      #   Pouch-<version>.msi      (WiX-built MSI installer; doubles as the
-      #                             updater payload -- Tauri v2 signs the MSI
-      #                             binary itself, not a zip wrapper)
-      #   Pouch-<version>.msi.sig  (minisign signature of the MSI, embedded
-      #                             into latest.json so the in-app updater
-      #                             can verify the download)
-      #   Pouch-<version>.exe      (portable binary for Scoop / power users)
-      #   Pouch-<version>.zip      (portable .exe + sample config + inject/)
+      #   Pouch-<version>.exe
+      #   Pouch-<version>.zip   (contains pouch.exe + config + inject/)
       #
-      # The portable zip's inner layout intentionally puts files at the
-      # archive root so a user can unzip-and-run.
+      # The zip's inner layout intentionally puts files at the archive root
+      # so a user can unzip-and-run.
       # ----------------------------------------------------------------------
       - name: Stage Windows artifacts
         if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
@@ -460,44 +417,6 @@ jobs:
             throw "Expected built binary not found: $exeSrc"
           }
 
-          $bundleMsi = Join-Path $repoRoot 'src-tauri/target/release/bundle/msi'
-          if (-not (Test-Path $bundleMsi)) {
-            throw "Expected MSI bundle directory not found: $bundleMsi"
-          }
-
-          # Final artifacts directory.
-          $out = Join-Path $repoRoot 'artifacts'
-          New-Item -ItemType Directory -Path $out -Force | Out-Null
-
-          # ----- MSI installer -----
-          # Filter by exact extension so `*.msi` does NOT also match files
-          # like `*.msi.sig` -- the bundler emits both side by side and
-          # PowerShell's -Filter is glob-matching, not literal. Tauri only
-          # produces one MSI per build.
-          $msiFiles = Get-ChildItem -Path $bundleMsi -Filter '*.msi' -File |
-            Where-Object { $_.Extension -eq '.msi' }
-          if ($msiFiles.Count -lt 1) {
-            throw "No .msi found in $bundleMsi"
-          }
-          Copy-Item $msiFiles[0].FullName (Join-Path $out "$assetBase.msi") -Force
-
-          # ----- Updater signature -----
-          # Tauri v2 signs the MSI binary directly (`.msi.sig`); it does not
-          # wrap the MSI in a zip the way v1 did. The .sig file is what we
-          # embed into latest.json so the in-app updater can verify the .msi
-          # download.
-          $sigFiles = Get-ChildItem -Path $bundleMsi -Filter '*.msi.sig' -File
-          if ($sigFiles.Count -lt 1) {
-            throw "No .msi.sig found in $bundleMsi -- is TAURI_SIGNING_PRIVATE_KEY set and bundle.createUpdaterArtifacts=true?"
-          }
-          Copy-Item $sigFiles[0].FullName (Join-Path $out "$assetBase.msi.sig") -Force
-
-          # ----- Portable .exe -----
-          # Tauri build runs cargo build then the bundler; the raw exe is
-          # still at target/release/pouch.exe after bundling.
-          Copy-Item $exeSrc (Join-Path $out "$assetBase.exe") -Force
-
-          # ----- Portable .zip -----
           # Staging directory whose contents become the zip's root entries.
           $stage = Join-Path $repoRoot "stage-$assetBase"
           if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
@@ -514,11 +433,18 @@ jobs:
           # NOTE: overrides/ is intentionally not copied; it holds runtime
           # cached resources and would leak local dev state into a release.
 
+          # Final artifacts directory.
+          $out = Join-Path $repoRoot 'artifacts'
+          New-Item -ItemType Directory -Path $out -Force | Out-Null
+
+          # Zip the staged tree (contents-of-stage, not stage itself).
           $zipPath = Join-Path $out "$assetBase.zip"
           if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
           Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zipPath
 
-          Remove-Item $stage -Recurse -Force
+          # Also publish the bare .exe under the same tag-bearing name for
+          # users who don't need the sample inject/ tree.
+          Copy-Item $exeSrc (Join-Path $out "$assetBase.exe")
 
           Write-Host 'Windows artifacts staged:'
           Get-ChildItem $out | ForEach-Object { Write-Host (' - ' + $_.FullName) }
@@ -529,8 +455,6 @@ jobs:
         with:
           name: windows-bundle
           path: |
-            artifacts/Pouch-*.msi
-            artifacts/Pouch-*.msi.sig
             artifacts/Pouch-*.exe
             artifacts/Pouch-*.zip
           if-no-files-found: error
@@ -564,7 +488,8 @@ jobs:
           path: artifacts
           # `merge-multiple: true` flattens artifact-name subdirs so all
           # files land directly under ./artifacts. With our two artifact
-          # names this leaves us with the .dmg, .exe, and .zip side by side.
+          # names this leaves us with the macOS .dmg + updater archive and
+          # the Windows .exe + .zip side by side.
           merge-multiple: true
 
       - name: List downloaded artifacts
@@ -577,9 +502,9 @@ jobs:
       #   https://github.com/leaker/pouch/releases/latest/download/latest.json
       #
       # so the manifest must live as a release asset named `latest.json`. We
-      # build it here from the .sig files that the macOS and Windows bundlers
-      # emitted next to the updater payloads, then attach it to the release
-      # in the next step.
+      # build it here from the .sig file that the macOS bundler emitted next
+      # to the updater payload, then attach it to the release in the next
+      # step.
       #
       # Notes on the platform keys:
       #   - darwin-universal / darwin-aarch64 / darwin-x86_64 all point at
@@ -588,7 +513,9 @@ jobs:
       #     every Mac. Listing the three keys is what the Tauri docs
       #     recommend for forward-compat with installers that resolve the
       #     exact host arch.
-      #   - windows-x86_64 is the only Windows arch we currently build.
+      #   - No Windows entry: Pouch does not ship a Windows installer, so
+      #     auto-update is macOS-only. Windows users upgrade through
+      #     `scoop update pouch` or by downloading a fresh portable build.
       # ----------------------------------------------------------------------
       - name: Generate latest.json for updater
         if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
@@ -599,19 +526,13 @@ jobs:
           set -euo pipefail
           VERSION="${REF_NAME#v}"
           DARWIN_SIG_FILE="artifacts/Pouch-${VERSION}.app.tar.gz.sig"
-          WIN_SIG_FILE="artifacts/Pouch-${VERSION}.msi.sig"
 
           if [[ ! -f "$DARWIN_SIG_FILE" ]]; then
             echo "::error::Missing $DARWIN_SIG_FILE -- did the macOS job emit the updater archive?"
             exit 1
           fi
-          if [[ ! -f "$WIN_SIG_FILE" ]]; then
-            echo "::error::Missing $WIN_SIG_FILE -- did the Windows job emit the MSI updater signature?"
-            exit 1
-          fi
 
           DARWIN_SIG=$(cat "$DARWIN_SIG_FILE")
-          WIN_SIG=$(cat "$WIN_SIG_FILE")
           PUB_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
           cat > artifacts/latest.json <<EOF
@@ -631,10 +552,6 @@ jobs:
               "darwin-x86_64": {
                 "signature": "${DARWIN_SIG}",
                 "url": "https://github.com/leaker/pouch/releases/download/${REF_NAME}/Pouch-${VERSION}.app.tar.gz"
-              },
-              "windows-x86_64": {
-                "signature": "${WIN_SIG}",
-                "url": "https://github.com/leaker/pouch/releases/download/${REF_NAME}/Pouch-${VERSION}.msi"
               }
             }
           }
@@ -674,9 +591,7 @@ jobs:
 
             **macOS:** `brew install --cask leaker/tap/pouch` (or download `Pouch-*.dmg` below)
 
-            **Windows (recommended):** `scoop bucket add leaker https://github.com/leaker/scoop-bucket && scoop install pouch`
-
-            **Windows MSI:** Download `Pouch-*.msi` below. First install shows a SmartScreen warning ("Windows protected your PC") because Pouch is not yet Authenticode-signed — click **More info** → **Run anyway**. This only appears on the first install of each version; later in-app updates are not flagged.
+            **Windows:** `scoop bucket add leaker https://github.com/leaker/scoop-bucket && scoop install pouch` (or download `Pouch-*.exe` / `Pouch-*.zip` below)
 
             See the [README](https://github.com/leaker/pouch#install) for full instructions.
 
@@ -684,21 +599,17 @@ jobs:
 
             **For users — pick one:**
             - `*.dmg` — macOS universal installer (signed and notarized)
-            - `*.msi` — Windows per-user installer
             - `*.exe` / `*.zip` — Windows portable
 
             **For Pouch's built-in updater (ignore unless curious):**
             - `*.app.tar.gz` + `.sig` — macOS update payload
-            - `*.msi.sig` — Windows update signature
-            - `latest.json` — updater channel manifest
+            - `latest.json` — updater channel manifest (macOS only)
 
             ---
           files: |
             artifacts/Pouch-*.dmg
             artifacts/Pouch-*.app.tar.gz
             artifacts/Pouch-*.app.tar.gz.sig
-            artifacts/Pouch-*.msi
-            artifacts/Pouch-*.msi.sig
             artifacts/Pouch-*.exe
             artifacts/Pouch-*.zip
             artifacts/latest.json
