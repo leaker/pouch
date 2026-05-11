@@ -334,11 +334,15 @@ jobs:
   # auto-updating users via the Tauri updater, plus the legacy portable .exe
   # and self-contained .zip that the Scoop bucket consumes.
   #
-  # We use tauri-action so the bundler produces the MSI and the updater
-  # archive (`*.msi.zip` + `*.msi.zip.sig`) that the in-app updater pulls
-  # down on Windows. The raw `pouch.exe` left in `target/release/` after the
-  # bundler runs is what we copy out for the portable artifacts -- tauri
-  # build is just cargo build + bundler, so the unsigned exe is still there.
+  # We use tauri-action so the bundler produces the MSI and its minisign
+  # signature (`*.msi` + `*.msi.sig`) that the in-app updater pulls down on
+  # Windows. Tauri v2 signs the MSI binary directly -- it does NOT wrap it
+  # in a zip the way v1 did (that legacy `.msi.zip` layout is only emitted
+  # when `plugins.updater.windows.installerArgs` opt-in `v1Compatible` is
+  # set, which we do not use). The raw `pouch.exe` left in `target/release/`
+  # after the bundler runs is what we copy out for the portable artifacts --
+  # tauri build is just cargo build + bundler, so the unsigned exe is still
+  # there.
   #
   # `args: --bundles msi` tells tauri to skip NSIS even though it's
   # technically a valid target -- we only ship MSI. (Windows `--bundles`
@@ -376,10 +380,10 @@ jobs:
         run: cargo check --locked
 
       # ----------------------------------------------------------------------
-      # Build via tauri-action so bundler emits the MSI and the updater
-      # archive (`*.msi.zip` + `*.msi.zip.sig`). The TAURI_SIGNING_* env
-      # pair is what makes the bundler create the .sig file alongside the
-      # .msi.zip -- without it we'd still get an MSI but no updater feed.
+      # Build via tauri-action so bundler emits the MSI and its updater
+      # signature (`*.msi` + `*.msi.sig`). The TAURI_SIGNING_* env pair is
+      # what makes the bundler create the .sig file alongside the .msi --
+      # without it we'd still get an MSI but no updater feed.
       #
       # Bundle target is restricted to `msi` (no NSIS) per Pouch's release
       # matrix decision. On Windows, tauri's `--bundles` flag only accepts
@@ -401,8 +405,7 @@ jobs:
       # exact updater artifact filenames Tauri v2 produced on Windows. The
       # expected layout under src-tauri/target/release/bundle/ is:
       #   msi/Pouch_<version>_x64_en-US.msi
-      #   msi/Pouch_<version>_x64_en-US.msi.zip
-      #   msi/Pouch_<version>_x64_en-US.msi.zip.sig
+      #   msi/Pouch_<version>_x64_en-US.msi.sig
       # If tauri-action ever changes this, the staging step below will
       # fail loudly and this listing tells us the new names.
       # ----------------------------------------------------------------------
@@ -422,11 +425,14 @@ jobs:
       # ref name (which has no leading `v` to strip).
       #
       # Layout produced inside ./artifacts:
-      #   Pouch-<version>.msi          (signed/notarized via WiX, ready installer)
-      #   Pouch-<version>.msi.zip      (updater payload, fetched by the in-app updater)
-      #   Pouch-<version>.msi.zip.sig  (minisign signature embedded into latest.json)
-      #   Pouch-<version>.exe          (portable binary for Scoop / power users)
-      #   Pouch-<version>.zip          (portable .exe + sample config + inject/)
+      #   Pouch-<version>.msi      (WiX-built MSI installer; doubles as the
+      #                             updater payload -- Tauri v2 signs the MSI
+      #                             binary itself, not a zip wrapper)
+      #   Pouch-<version>.msi.sig  (minisign signature of the MSI, embedded
+      #                             into latest.json so the in-app updater
+      #                             can verify the download)
+      #   Pouch-<version>.exe      (portable binary for Scoop / power users)
+      #   Pouch-<version>.zip      (portable .exe + sample config + inject/)
       #
       # The portable zip's inner layout intentionally puts files at the
       # archive root so a user can unzip-and-run.
@@ -464,8 +470,10 @@ jobs:
           New-Item -ItemType Directory -Path $out -Force | Out-Null
 
           # ----- MSI installer -----
-          # Prefer the literal `*.msi` (not `*.msi.zip`) by filtering by
-          # exact extension. Tauri only produces one MSI per build.
+          # Filter by exact extension so `*.msi` does NOT also match files
+          # like `*.msi.sig` -- the bundler emits both side by side and
+          # PowerShell's -Filter is glob-matching, not literal. Tauri only
+          # produces one MSI per build.
           $msiFiles = Get-ChildItem -Path $bundleMsi -Filter '*.msi' -File |
             Where-Object { $_.Extension -eq '.msi' }
           if ($msiFiles.Count -lt 1) {
@@ -473,19 +481,16 @@ jobs:
           }
           Copy-Item $msiFiles[0].FullName (Join-Path $out "$assetBase.msi") -Force
 
-          # ----- Updater archive (.msi.zip) -----
-          $msiZipFiles = Get-ChildItem -Path $bundleMsi -Filter '*.msi.zip' -File
-          if ($msiZipFiles.Count -lt 1) {
-            throw "No .msi.zip found in $bundleMsi -- is TAURI_SIGNING_PRIVATE_KEY set and bundle.createUpdaterArtifacts=true?"
-          }
-          Copy-Item $msiZipFiles[0].FullName (Join-Path $out "$assetBase.msi.zip") -Force
-
           # ----- Updater signature -----
-          $sigFiles = Get-ChildItem -Path $bundleMsi -Filter '*.msi.zip.sig' -File
+          # Tauri v2 signs the MSI binary directly (`.msi.sig`); it does not
+          # wrap the MSI in a zip the way v1 did. The .sig file is what we
+          # embed into latest.json so the in-app updater can verify the .msi
+          # download.
+          $sigFiles = Get-ChildItem -Path $bundleMsi -Filter '*.msi.sig' -File
           if ($sigFiles.Count -lt 1) {
-            throw "No .msi.zip.sig found in $bundleMsi"
+            throw "No .msi.sig found in $bundleMsi -- is TAURI_SIGNING_PRIVATE_KEY set and bundle.createUpdaterArtifacts=true?"
           }
-          Copy-Item $sigFiles[0].FullName (Join-Path $out "$assetBase.msi.zip.sig") -Force
+          Copy-Item $sigFiles[0].FullName (Join-Path $out "$assetBase.msi.sig") -Force
 
           # ----- Portable .exe -----
           # Tauri build runs cargo build then the bundler; the raw exe is
@@ -525,8 +530,7 @@ jobs:
           name: windows-bundle
           path: |
             artifacts/Pouch-*.msi
-            artifacts/Pouch-*.msi.zip
-            artifacts/Pouch-*.msi.zip.sig
+            artifacts/Pouch-*.msi.sig
             artifacts/Pouch-*.exe
             artifacts/Pouch-*.zip
           if-no-files-found: error
@@ -595,14 +599,14 @@ jobs:
           set -euo pipefail
           VERSION="${REF_NAME#v}"
           DARWIN_SIG_FILE="artifacts/Pouch-${VERSION}.app.tar.gz.sig"
-          WIN_SIG_FILE="artifacts/Pouch-${VERSION}.msi.zip.sig"
+          WIN_SIG_FILE="artifacts/Pouch-${VERSION}.msi.sig"
 
           if [[ ! -f "$DARWIN_SIG_FILE" ]]; then
             echo "::error::Missing $DARWIN_SIG_FILE -- did the macOS job emit the updater archive?"
             exit 1
           fi
           if [[ ! -f "$WIN_SIG_FILE" ]]; then
-            echo "::error::Missing $WIN_SIG_FILE -- did the Windows job emit the updater archive?"
+            echo "::error::Missing $WIN_SIG_FILE -- did the Windows job emit the MSI updater signature?"
             exit 1
           fi
 
@@ -630,7 +634,7 @@ jobs:
               },
               "windows-x86_64": {
                 "signature": "${WIN_SIG}",
-                "url": "https://github.com/leaker/pouch/releases/download/${REF_NAME}/Pouch-${VERSION}.msi.zip"
+                "url": "https://github.com/leaker/pouch/releases/download/${REF_NAME}/Pouch-${VERSION}.msi"
               }
             }
           }
@@ -654,8 +658,7 @@ jobs:
             artifacts/Pouch-*.app.tar.gz
             artifacts/Pouch-*.app.tar.gz.sig
             artifacts/Pouch-*.msi
-            artifacts/Pouch-*.msi.zip
-            artifacts/Pouch-*.msi.zip.sig
+            artifacts/Pouch-*.msi.sig
             artifacts/Pouch-*.exe
             artifacts/Pouch-*.zip
             artifacts/latest.json
