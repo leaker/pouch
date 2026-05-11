@@ -1,0 +1,246 @@
+# =============================================================================
+# Auto-bump Homebrew tap and Scoop bucket when a GitHub Release is published.
+#
+# Why this is a separate workflow
+# -------------------------------
+# `build.yml` is the producer: it builds the macOS .dmg + Windows .exe / .zip
+# and publishes a GitHub Release via softprops/action-gh-release. The moment
+# that Release goes from "creating" to "published", the asset URLs
+# (https://github.com/leaker/pouch/releases/download/v<ver>/Pouch-<ver>.<ext>)
+# become stable and SHA256-addressable.
+#
+# This workflow is the consumer of that event. It:
+#   1. Resolves the published tag and strips the leading `v`.
+#   2. Downloads `Pouch-<version>.dmg` (macOS) and `Pouch-<version>.zip`
+#      (Windows) from the just-published Release, computes their sha256.
+#   3. Checks out leaker/homebrew-tap, rewrites Casks/pouch.rb's `version` +
+#      `sha256` fields, commits with author `leaker[bot]`, pushes to main.
+#   4. Checks out leaker/scoop-bucket, rewrites bucket/pouch.json's
+#      `version`, `architecture.64bit.url`, `architecture.64bit.hash`,
+#      commits, pushes to main.
+#
+# Net result: `brew upgrade --cask pouch` and `scoop update pouch` resolve to
+# the new release within seconds of the release going live, with no manual
+# bumping in either downstream repo.
+#
+# Trigger choice: `release.published` (NOT `release.created`)
+# ----------------------------------------------------------
+# `release.created` fires before the action-gh-release upload step finishes.
+# At that point `gh release download` would race against the upload and
+# either 404 or fetch a partial asset. `release.published` only fires once
+# the Release transitions to its final published state, after all assets
+# are uploaded. That's what we want.
+#
+# Tag pushes (`push: tags`) would be even earlier and are explicitly wrong
+# for this job -- by then we don't even know if the build will succeed.
+#
+# Cross-repo push needs a PAT, not GITHUB_TOKEN
+# ---------------------------------------------
+# The default `GITHUB_TOKEN` is scoped to the workflow's own repo. Pushing
+# to leaker/homebrew-tap and leaker/scoop-bucket requires a Personal Access
+# Token configured as the `PACKAGE_MANAGER_BUMP_TOKEN` secret. See
+# RELEASING.md for setup instructions (classic PAT with `repo` scope, or
+# fine-grained PAT limited to the two downstream repos with
+# Contents: read & write).
+#
+# Manual / backfill trigger
+# -------------------------
+# `workflow_dispatch` is enabled with an optional `tag` input so a
+# maintainer can re-run the bump against any past release (e.g. after a
+# token rotation, after fixing the manifests, or when first wiring this up
+# against a release that predates this workflow).
+#
+# Idempotency
+# -----------
+# Each `Bump ...` step exits cleanly when the rewrite produces no diff
+# (e.g. the manifest is already at the target version). The downstream
+# `Commit & push ...` step then short-circuits on the same `git diff`
+# check, so re-running this workflow against an already-bumped tag is a
+# no-op rather than producing empty commits.
+#
+# Workflow-injection hardening
+# ----------------------------
+# All values originating from event payload / user input (release tag, version)
+# enter shell steps via `env:` and are dereferenced as quoted shell variables
+# inside `run:`. We never inline `${{ github.event.* }}` into a script body,
+# which is the standard mitigation against GHA workflow-injection attacks.
+# =============================================================================
+
+name: Bump package manager manifests
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v2.0.1). Defaults to the latest published release."
+        required: false
+
+# Read-only at the workflow level. The PAT carries write permission to the
+# downstream repos; GITHUB_TOKEN here only needs `contents: read` to call
+# `gh release download` against this same repo.
+permissions:
+  contents: read
+
+jobs:
+  bump:
+    name: Bump tap + bucket
+    # Skip drafts and prereleases so an `rc` / `beta` tag doesn't downgrade
+    # the cask / bucket for end users on the stable channel. `workflow_dispatch`
+    # has no release context, so `prerelease` / `draft` are null and the
+    # negation still permits manual runs.
+    if: ${{ github.event_name == 'workflow_dispatch' || (!github.event.release.prerelease && !github.event.release.draft) }}
+    runs-on: ubuntu-latest
+
+    steps:
+      # ----------------------------------------------------------------------
+      # Resolve which tag we're bumping to.
+      #
+      #   - `release` event: use github.event.release.tag_name (authoritative).
+      #   - `workflow_dispatch` with explicit `tag` input: use that.
+      #   - `workflow_dispatch` with empty input: fall back to the latest
+      #     published release via `gh release view`.
+      #
+      # `version` is the tag minus the leading `v` -- that's what feeds into
+      # the asset filename `Pouch-<version>.<ext>` and into both manifests.
+      # ----------------------------------------------------------------------
+      - name: Resolve release tag
+        id: meta
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_TAG: ${{ inputs.tag }}
+          EVENT_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          TAG="${EVENT_TAG:-$INPUT_TAG}"
+          if [ -z "$TAG" ]; then
+            TAG=$(gh release view --repo "${GITHUB_REPOSITORY}" --json tagName -q .tagName)
+          fi
+          VERSION="${TAG#v}"
+          echo "tag=$TAG"         >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Resolved tag=$TAG version=$VERSION"
+
+      # ----------------------------------------------------------------------
+      # Download the .dmg and .zip from the resolved release and compute
+      # sha256 for each. `gh release download` will fail loudly if either
+      # asset is missing, which is the behaviour we want -- a bump against
+      # a half-uploaded release should not silently push a stale hash.
+      # ----------------------------------------------------------------------
+      - name: Download release artifacts & compute sha256
+        id: sha
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts && cd artifacts
+          gh release download "$TAG" --repo "${GITHUB_REPOSITORY}" \
+            --pattern "Pouch-${VERSION}.dmg" \
+            --pattern "Pouch-${VERSION}.zip"
+          DMG_SHA=$(shasum -a 256 "Pouch-${VERSION}.dmg" | awk '{print $1}')
+          ZIP_SHA=$(shasum -a 256 "Pouch-${VERSION}.zip" | awk '{print $1}')
+          echo "dmg_sha256=$DMG_SHA" >> "$GITHUB_OUTPUT"
+          echo "zip_sha256=$ZIP_SHA" >> "$GITHUB_OUTPUT"
+          echo "dmg sha256: $DMG_SHA"
+          echo "zip sha256: $ZIP_SHA"
+
+      # ----------------------------------------------------------------------
+      # Homebrew tap bump.
+      # ----------------------------------------------------------------------
+      - name: Checkout homebrew-tap
+        uses: actions/checkout@v4
+        with:
+          repository: leaker/homebrew-tap
+          token: ${{ secrets.PACKAGE_MANAGER_BUMP_TOKEN }}
+          path: tap
+
+      # Anchored sed: `^  version "..."` and `^  sha256 "..."` (two leading
+      # spaces matching Cask indentation). The sha256 replacement uses the
+      # `0,/.../{...}` address form so we only touch the FIRST sha256 line
+      # in the cask, even if a future cask grows a livecheck block with its
+      # own checksum-bearing lines.
+      - name: Bump Cask
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          DMG_SHA: ${{ steps.sha.outputs.dmg_sha256 }}
+        run: |
+          set -euo pipefail
+          cd tap
+          sed -i -E 's|^  version ".*"|  version "'"$VERSION"'"|' Casks/pouch.rb
+          sed -i -E '0,/^  sha256 ".*"/{s|^  sha256 ".*"|  sha256 "'"$DMG_SHA"'"|}' Casks/pouch.rb
+          if git diff --quiet; then
+            echo "No changes to Cask -- version already at $VERSION."
+            exit 0
+          fi
+          git diff Casks/pouch.rb
+
+      - name: Commit & push homebrew-tap
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          cd tap
+          if git diff --quiet; then
+            echo "No diff -- skipping commit."
+            exit 0
+          fi
+          git -c user.name="leaker[bot]" -c user.email="claude@leelib.com" \
+            commit -am "pouch: bump to ${VERSION}"
+          git push origin HEAD:main
+
+      # ----------------------------------------------------------------------
+      # Scoop bucket bump.
+      #
+      # We use Python's `json` module rather than sed on JSON: it preserves
+      # the rest of the manifest verbatim while updating the three fields
+      # that need to change, and it can't accidentally corrupt the file by
+      # matching the wrong key.
+      # ----------------------------------------------------------------------
+      - name: Checkout scoop-bucket
+        uses: actions/checkout@v4
+        with:
+          repository: leaker/scoop-bucket
+          token: ${{ secrets.PACKAGE_MANAGER_BUMP_TOKEN }}
+          path: bucket
+
+      - name: Bump Scoop manifest
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          ZIP_SHA: ${{ steps.sha.outputs.zip_sha256 }}
+        run: |
+          set -euo pipefail
+          cd bucket
+          python3 <<'PY'
+          import json, os, pathlib
+          v   = os.environ["VERSION"]
+          sha = os.environ["ZIP_SHA"]
+          p   = pathlib.Path("bucket/pouch.json")
+          m   = json.loads(p.read_text())
+          m["version"] = v
+          arch = m["architecture"]["64bit"]
+          arch["url"]  = f"https://github.com/leaker/pouch/releases/download/v{v}/Pouch-{v}.zip"
+          arch["hash"] = sha
+          p.write_text(json.dumps(m, indent=4) + "\n")
+          PY
+          if git diff --quiet; then
+            echo "No changes to manifest -- version already at $VERSION."
+            exit 0
+          fi
+          git diff bucket/pouch.json
+
+      - name: Commit & push scoop-bucket
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          cd bucket
+          if git diff --quiet; then
+            echo "No diff -- skipping commit."
+            exit 0
+          fi
+          git -c user.name="leaker[bot]" -c user.email="claude@leelib.com" \
+            commit -am "pouch: bump to ${VERSION}"
+          git push origin HEAD:main
