@@ -643,6 +643,14 @@ jobs:
           echo "Generated latest.json:"
           cat artifacts/latest.json
 
+      # `prerelease` is computed from the tag name so any `-rc`, `-beta`, or
+      # `-alpha` suffix lands as a GitHub prerelease. This keeps brew's
+      # livecheck and scoop's checkver from picking rc / beta tags as
+      # "latest stable", and it also gates the bump-package-managers workflow
+      # which skips on `github.event.release.prerelease`. SemVer-style
+      # `v1.2.3` (no suffix) stays a normal release; we deliberately do NOT
+      # match the generic `-` form so a future `-hotfix` tag wouldn't be
+      # mistakenly demoted.
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v3
@@ -650,7 +658,7 @@ jobs:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
           draft: false
-          prerelease: false
+          prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha') }}
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: |
