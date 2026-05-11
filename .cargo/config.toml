@@ -2,10 +2,34 @@
 # Replaces the deprecated bun + package.json scripts.
 #
 # Run from the repo root:
-#   cargo dev        -> tauri dev (development mode with hot-reload)
-#   cargo start      -> run the release binary directly (no bundling)
-#   cargo build-app  -> tauri build --no-bundle (compile signed binary into target/release/)
-#   cargo bundle     -> tauri build (full .app + .dmg on macOS, .msi + .exe on Windows)
+#   cargo dev               -> tauri dev (development mode with hot-reload)
+#   cargo start             -> run the release binary directly (no bundling)
+#   cargo build-app         -> tauri build --no-bundle (compile signed binary into target/release/)
+#   cargo bundle            -> tauri build (host-arch quick check; NOT release-equivalent on macOS)
+#   cargo bundle-universal  -> tauri build --target universal-apple-darwin
+#                              (mirrors the macOS CI release artifact: x86_64 + aarch64 lipo'd
+#                               fat binary, as produced by tauri-action with
+#                               `args: --target universal-apple-darwin` in .github/workflows/build.yml)
+#
+# Which alias to use for what
+# ---------------------------
+#   - Iterating locally on macOS, just want to confirm bundling still works:
+#       `cargo bundle`        (fast, host arch only -- on Apple Silicon this is aarch64-only)
+#   - Reproducing the CI macOS release .dmg locally (recommended for any
+#     release-candidate testing, signing/notarization rehearsals, or before
+#     pushing a `v*` tag):
+#       `cargo bundle-universal`
+#   - Windows: there is no universal equivalent; CI bypasses the tauri bundler
+#     and runs `cargo build --release` directly. Locally use `cargo bundle` or
+#     `cargo build-app` as appropriate -- `bundle-universal` is macOS-only.
+#
+# First-time setup for `bundle-universal`
+# ---------------------------------------
+# The x86_64 toolchain is not installed by default on Apple Silicon machines.
+# Run once:
+#       rustup target add x86_64-apple-darwin
+# (CI does this automatically in the release job; see the "Add x86_64 Apple
+# Darwin target" step in .github/workflows/build.yml.)
 #
 # `cargo build` is a built-in cargo subcommand and cannot be aliased; use
 # `cargo build-app` (alias) or `cargo tauri build` (direct) for app bundles.
@@ -15,3 +39,4 @@ dev = "tauri dev"
 start = "run --release --manifest-path src-tauri/Cargo.toml"
 build-app = "tauri build --no-bundle"
 bundle = "tauri build"
+bundle-universal = "tauri build --target universal-apple-darwin"
