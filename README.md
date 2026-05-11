@@ -38,7 +38,7 @@ On first launch Pouch asks to trust a local certificate so it can view and modif
 
 Download the latest `Pouch-<version>.msi` from the [releases page](https://github.com/leaker/pouch/releases/latest) and run it. The installer:
 
-- Installs to `Program Files\Pouch\` (per-machine) or `%LOCALAPPDATA%\Programs\Pouch\` if you run it without admin rights, and adds a Start Menu shortcut.
+- Installs to `%LOCALAPPDATA%\Programs\Pouch\` (per-user, no UAC prompt — same convention as Chrome and VS Code), and adds a Start Menu shortcut.
 - Bundles the WebView2 Runtime bootstrapper, so older Windows machines without WebView2 install it automatically.
 - Cleanly replaces earlier MSI installs without touching your data in `%APPDATA%\Pouch\`.
 - Wires up the built-in auto-update — new releases are offered in-app, no reinstall needed.

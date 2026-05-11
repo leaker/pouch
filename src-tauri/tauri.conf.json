@@ -30,7 +30,8 @@
       },
       "wix": {
         "upgradeCode": "092EA9A1-C124-4556-94C6-0B55F0C3A5D6",
-        "language": ["en-US"]
+        "language": ["en-US"],
+        "template": "wix/main.wxs"
       }
     },
     "android": {
