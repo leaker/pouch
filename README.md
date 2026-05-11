@@ -34,18 +34,9 @@ brew upgrade --cask pouch
 
 On first launch Pouch asks to trust a local certificate so it can view and modify HTTPS traffic for the page you load. Approve once at the system prompt and you're done — there is no second prompt on later launches.
 
-### Windows — MSI installer (recommended)
+### Windows — Scoop (recommended)
 
-Download the latest `Pouch-<version>.msi` from the [releases page](https://github.com/leaker/pouch/releases/latest) and run it. The installer:
-
-- Installs to `%LOCALAPPDATA%\Programs\Pouch\` (per-user, no UAC prompt — same convention as Chrome and VS Code), and adds a Start Menu shortcut.
-- Bundles the WebView2 Runtime bootstrapper, so older Windows machines without WebView2 install it automatically.
-- Cleanly replaces earlier MSI installs without touching your data in `%APPDATA%\Pouch\`.
-- Wires up the built-in auto-update — new releases are offered in-app, no reinstall needed.
-
-If SmartScreen flags the binary on first run, click **More info** → **Run anyway**. Pouch is open source but not Authenticode-signed yet.
-
-### Windows — Scoop
+Scoop downloads Pouch through PowerShell as a portable zip — Windows does not flag it with SmartScreen. This is the smoothest install path.
 
 ```pwsh
 scoop bucket add leaker https://github.com/leaker/scoop-bucket
@@ -60,15 +51,41 @@ scoop update pouch
 
 Scoop installs the portable `pouch.exe`. The built-in auto-update is disabled for scoop installs — `scoop update pouch` is the upgrade path.
 
+### Windows — MSI installer
+
+For users who prefer a graphical installer, or environments using Group Policy / Intune for deployment.
+
+> **Heads-up — SmartScreen warning on first install**
+>
+> Pouch is not yet Authenticode-signed, so the first time you open `Pouch-<version>.msi` Windows shows:
+>
+> > Windows protected your PC
+> > Microsoft Defender SmartScreen prevented an unrecognized app from starting.
+>
+> Click **More info** → **Run anyway** to proceed. This warning only appears on the first install of each version; later updates installed through Pouch's built-in updater are not flagged.
+
+Download `Pouch-<version>.msi` from the [releases page](https://github.com/leaker/pouch/releases/latest) and run it. The installer:
+
+- Installs to `%LOCALAPPDATA%\Programs\Pouch\` (per-user, no UAC prompt — same convention as Chrome and VS Code), and adds a Start Menu shortcut.
+- Bundles the WebView2 Runtime bootstrapper, so older Windows machines without WebView2 install it automatically.
+- Cleanly replaces earlier MSI installs without touching your data in `%APPDATA%\Pouch\`.
+- Wires up the built-in auto-update — new releases are offered in-app, no reinstall needed.
+
 ### Direct download
 
-For users not on brew/scoop, grab the latest build from the [releases page](https://github.com/leaker/pouch/releases/latest):
+For users without Homebrew or Scoop, grab the latest build from the [releases page](https://github.com/leaker/pouch/releases/latest).
 
-- **macOS** — `Pouch-<version>.dmg` (universal, signed and notarized)
-- **Windows** —
-  - `Pouch-<version>.msi` (recommended installer; bundles WebView2 bootstrap, creates a Start Menu shortcut, supports the built-in auto-update)
-  - `Pouch-<version>.exe` (portable binary; double-click to run)
-  - `Pouch-<version>.zip` (portable binary plus sample `hook.conf.toml` and `inject/` folder)
+**Pick one to install:**
+
+- **macOS** — `Pouch-<version>.dmg` (universal binary, signed and notarized)
+- **Windows MSI** — `Pouch-<version>.msi` (per-user installer; see SmartScreen note above)
+- **Windows portable** — `Pouch-<version>.exe` (single binary, double-click to run) or `Pouch-<version>.zip` (binary plus sample `hook.conf.toml` and `inject/` folder)
+
+**Ignore these — they're used by Pouch's built-in updater:**
+
+- `Pouch-<version>.app.tar.gz` + `.sig` (macOS update payload)
+- `Pouch-<version>.msi.sig` (Windows update signature)
+- `latest.json` (updater channel manifest)
 
 ## First run
 

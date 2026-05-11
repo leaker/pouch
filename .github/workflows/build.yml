@@ -651,6 +651,14 @@ jobs:
       # `v1.2.3` (no suffix) stays a normal release; we deliberately do NOT
       # match the generic `-` form so a future `-hotfix` tag wouldn't be
       # mistakenly demoted.
+      # The `body:` field below is prepended to the auto-generated changelog.
+      # softprops/action-gh-release concatenates them as
+      # `${body}\n\n${generated_notes}` when both `body:` and
+      # `generate_release_notes: true` are set, so the install guidance lands
+      # above GitHub's "What's Changed" / "Full Changelog" section on the
+      # release page. Keep this template in sync with the README "Install"
+      # section so first-time visitors get the same SmartScreen heads-up
+      # whether they land on the release page or the README.
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v3
@@ -661,6 +669,30 @@ jobs:
           prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha') }}
           generate_release_notes: true
           fail_on_unmatched_files: true
+          body: |
+            ## Install
+
+            **macOS:** `brew install --cask leaker/tap/pouch` (or download `Pouch-*.dmg` below)
+
+            **Windows (recommended):** `scoop bucket add leaker https://github.com/leaker/scoop-bucket && scoop install pouch`
+
+            **Windows MSI:** Download `Pouch-*.msi` below. First install shows a SmartScreen warning ("Windows protected your PC") because Pouch is not yet Authenticode-signed — click **More info** → **Run anyway**. This only appears on the first install of each version; later in-app updates are not flagged.
+
+            See the [README](https://github.com/leaker/pouch#install) for full instructions.
+
+            ## Asset guide
+
+            **For users — pick one:**
+            - `*.dmg` — macOS universal installer (signed and notarized)
+            - `*.msi` — Windows per-user installer
+            - `*.exe` / `*.zip` — Windows portable
+
+            **For Pouch's built-in updater (ignore unless curious):**
+            - `*.app.tar.gz` + `.sig` — macOS update payload
+            - `*.msi.sig` — Windows update signature
+            - `latest.json` — updater channel manifest
+
+            ---
           files: |
             artifacts/Pouch-*.dmg
             artifacts/Pouch-*.app.tar.gz
