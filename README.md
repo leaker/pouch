@@ -34,7 +34,18 @@ brew upgrade --cask pouch
 
 On first launch Pouch asks to trust a local certificate so it can view and modify HTTPS traffic for the page you load. Approve once at the system prompt and you're done — there is no second prompt on later launches.
 
-### Windows — Scoop (recommended)
+### Windows — MSI installer (recommended)
+
+Download the latest `Pouch-<version>.msi` from the [releases page](https://github.com/leaker/pouch/releases/latest) and run it. The installer:
+
+- Installs to `Program Files\Pouch\` (per-machine) or `%LOCALAPPDATA%\Programs\Pouch\` if you run it without admin rights, and adds a Start Menu shortcut.
+- Bundles the WebView2 Runtime bootstrapper, so older Windows machines without WebView2 install it automatically.
+- Cleanly replaces earlier MSI installs without touching your data in `%APPDATA%\Pouch\`.
+- Wires up the built-in auto-update — new releases are offered in-app, no reinstall needed.
+
+If SmartScreen flags the binary on first run, click **More info** → **Run anyway**. Pouch is open source but not Authenticode-signed yet.
+
+### Windows — Scoop
 
 ```pwsh
 scoop bucket add leaker https://github.com/leaker/scoop-bucket
@@ -47,14 +58,17 @@ Updating:
 scoop update pouch
 ```
 
-If SmartScreen flags the binary on first run, right-click the file → **Properties** → **Unblock**, then relaunch. Pouch is open source but not Authenticode-signed yet.
+Scoop installs the portable `pouch.exe`. The built-in auto-update is disabled for scoop installs — `scoop update pouch` is the upgrade path.
 
 ### Direct download
 
 For users not on brew/scoop, grab the latest build from the [releases page](https://github.com/leaker/pouch/releases/latest):
 
 - **macOS** — `Pouch-<version>.dmg` (universal, signed and notarized)
-- **Windows** — `Pouch-<version>.exe` (portable binary; double-click to run) or `Pouch-<version>.zip` (portable binary plus sample `hook.conf.toml` and `inject/` folder)
+- **Windows** —
+  - `Pouch-<version>.msi` (recommended installer; bundles WebView2 bootstrap, creates a Start Menu shortcut, supports the built-in auto-update)
+  - `Pouch-<version>.exe` (portable binary; double-click to run)
+  - `Pouch-<version>.zip` (portable binary plus sample `hook.conf.toml` and `inject/` folder)
 
 ## First run
 
@@ -65,6 +79,10 @@ On launch Pouch reads `hook.conf.toml` and opens every URL listed in `startup_ur
 
 Press **F12** any time to open DevTools. On macOS, the right side of the title bar carries three shortcut buttons — reveal the Pouch data folder in Finder, reload from config (`Cmd+R`), toggle DevTools (`F12`) — and `Cmd+N` opens a "new window" prompt with a URL combobox that remembers recent destinations.
 
+### First run on Windows after upgrading from v2.0.x
+
+Starting with v2.1.0, Pouch stores its data in `%APPDATA%\Pouch\` instead of next to `pouch.exe`. On first launch after the upgrade, Pouch automatically moves your `hook.conf.toml`, `inject/`, and `overrides/` from the old portable location into `%APPDATA%\Pouch\`. The migration is one-shot — a marker file in the new directory prevents it from running again, so it's safe to keep upgrading.
+
 ## Configuration
 
 Pouch reads a single TOML file on launch. Edit it and hit Reload (`Cmd/Ctrl+R`) to apply.
@@ -72,7 +90,7 @@ Pouch reads a single TOML file on launch. Edit it and hit Reload (`Cmd/Ctrl+R`) 
 | Platform | Path |
 |---|---|
 | macOS | `~/Library/Application Support/Pouch/hook.conf.toml` |
-| Windows | Next to `pouch.exe` (portable layout) |
+| Windows | `%APPDATA%\Pouch\hook.conf.toml` |
 
 A fully-commented default is seeded on first launch and never overwritten — open it in your editor and tweak in place.
 
@@ -85,8 +103,36 @@ A fully-commented default is seeded on first launch and never overwritten — op
   - `wildcard` — host glob; `*` matches one label and does not cross `.` (`{ wildcard = "*.google.com" }` matches `fonts.google.com` but not `google.com`).
   - `url_wildcard` — full-URL glob; `*` matches any characters including `/`. Anchored at both ends.
   - `url_regex` — raw regex against the full URL; you control the anchors.
+- `updater.auto_check` — whether Pouch silently checks for updates ~5 seconds after launch. Default `true`. Setting to `false` keeps the "Check for Updates…" menu item but disables the background check.
 
 See the [sample `hook.conf.toml`](hook.conf.toml) at the project root for inline documentation on every field, including how parse failures are handled.
+
+## Updates
+
+### macOS app and Windows MSI
+
+Pouch checks GitHub for new releases about five seconds after launch (silent — you only see a prompt if a newer version is published) and offers a manual **Check for Updates…** menu item:
+
+- macOS: Pouch menu (next to About)
+- Windows: View menu
+
+When you accept, Pouch downloads the signed update and restarts. Your data in `~/Library/Application Support/Pouch/` (macOS) or `%APPDATA%\Pouch\` (Windows) is preserved across updates.
+
+You can disable the silent check in `hook.conf.toml`:
+
+```toml
+[updater]
+auto_check = false
+```
+
+The **Check for Updates…** menu item still works manually.
+
+### Portable .exe and scoop installs
+
+Auto-update is **not** available for portable builds and scoop installs. Running **Check for Updates…** on these shows a notice pointing to the releases page. Upgrade by:
+
+- portable: download the new `.exe` and replace
+- scoop: `scoop update pouch`
 
 ## Customize a site
 
@@ -95,22 +141,22 @@ Pouch keeps everything you can tweak inside its data folder:
 | Platform | Data folder |
 |---|---|
 | macOS | `~/Library/Application Support/Pouch/` |
-| Windows | Next to `pouch.exe` (portable layout) |
+| Windows | `%APPDATA%\Pouch\` |
 
 Use the title bar's reveal-folder button (or `View → Reveal Pouch Folder`, `Cmd+Shift+O` on macOS) to jump straight there.
 
 ### Inject your own scripts
 
-Put a `.js` file anywhere under `inject/` and declare which URLs it runs on with a Tampermonkey-style header. Pouch scans `inject/` recursively at launch, so feel free to organize by host, by feature, or however you like — what decides the match is the `@match` line, not the folder name.
+Put a `.js` file anywhere under `inject/` and declare which URLs it runs on with a Tampermonkey-style header. Pouch scans `inject/` recursively at launch, so feel free to organize by host, by feature, or however you like — what decides the match is the `@match` line, not the folder name. Replace `example.com` below with the site you want to customize.
 
 ```js
 // ==UserScript==
-// @name   tweak leelib
-// @match  https://www.leelib.com/*
+// @name   tweak example
+// @match  https://www.example.com/*
 // ==/UserScript==
 
 (function () {
-  console.log('[leelib] running on', location.host);
+  console.log('[tweak] running on', location.host);
   // your tweaks here
 })();
 ```
@@ -150,22 +196,25 @@ Hosts and URL patterns listed in `ignore_urls` are fetched but never written to 
 ### macOS (Homebrew)
 
 ```bash
-brew uninstall --cask --zap pouch
+brew uninstall --cask pouch         # remove the app only
+brew uninstall --cask --zap pouch   # remove the app AND your data
 ```
 
-`--zap` clears `~/Library/Application Support/Pouch/` and related caches. The trusted certificate stays in your Keychain — open Keychain Access, search for "Pouch", and delete the entry manually if you want it gone. Drop `--zap` to keep your inject scripts and overrides.
+> **Warning**: `--zap` permanently deletes your inject scripts, overrides cache, and `hook.conf.toml` — everything under `~/Library/Application Support/Pouch/` plus related WebView caches. Back up your `inject/` folder first if you want to keep your work. Drop `--zap` to keep your data and reinstall later.
 
-### Windows (Scoop)
+The trusted certificate stays in your Keychain — open Keychain Access, search for "Pouch", and delete the entry manually if you want it gone.
 
-```pwsh
-scoop uninstall pouch
-```
+### Windows
 
-`scoop uninstall pouch` removes the application but keeps your `hook.conf.toml`, `inject/`, and `overrides/` in scoop's persist folder (typically `~/scoop/persist/pouch/`). Use `scoop uninstall pouch --purge` to wipe those as well.
+- **MSI install**: Add/Remove Programs (Settings → Apps → Installed apps) → Pouch → Uninstall.
+- **Scoop**: `scoop uninstall pouch`.
+- **Portable**: delete `pouch.exe` (and the surrounding folder if you extracted the zip).
 
-### Manual install
+In all cases, your data in `%APPDATA%\Pouch\` is left in place. Delete that folder manually if you want a clean slate.
 
-Drag `Pouch.app` to the Trash on macOS, or delete the install directory on Windows. Then remove the data folder listed under [Customize a site](#customize-a-site) if you want to wipe your tweaks too.
+### Manual install (macOS)
+
+Drag `Pouch.app` to the Trash. Remove `~/Library/Application Support/Pouch/` if you want to wipe your tweaks too.
 
 ## Build from source
 
