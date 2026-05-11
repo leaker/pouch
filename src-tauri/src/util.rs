@@ -86,6 +86,43 @@ pub fn macos_app_support_dir() -> Option<PathBuf> {
     )
 }
 
+/// Windows only: per-user data root at `%APPDATA%\Pouch\`.
+///
+/// Matches the canonical Roaming AppData layout (KNOWNFOLDERID
+/// `FOLDERID_RoamingAppData`) — the equivalent of macOS's
+/// `~/Library/Application Support/Pouch/`. v2.1.0 promoted Windows from a
+/// "portable" exe-sibling layout to this location so user data survives
+/// scoop / MSI upgrades and lives outside `Program Files` (where the
+/// installer's working tree is wiped on uninstall).
+///
+/// Returns `None` only if `%APPDATA%` is unset — extremely rare on real
+/// Windows sessions but possible in stripped-down CI / SYSTEM contexts;
+/// the [`user_data_path`] chain falls through to the legacy portable
+/// layout when that happens.
+///
+/// Uses `std::env::var_os` rather than the `dirs` crate so we don't pull
+/// in another dependency for what is effectively a single env-var read.
+#[cfg(target_os = "windows")]
+pub fn windows_appdata_dir() -> Option<PathBuf> {
+    let appdata = std::env::var_os("APPDATA")?;
+    Some(PathBuf::from(appdata).join("Pouch"))
+}
+
+/// Windows only: the legacy v2.0.x portable root (the directory holding
+/// `pouch.exe`).
+///
+/// Pre-v2.1.0 release builds stored `hook.conf.toml`, `inject/`, and
+/// `overrides/` next to the binary. This helper is kept exclusively for
+/// the one-shot AppData migration ([`crate::migrate`]) and for the
+/// portable fallback inside [`user_data_path`] when `%APPDATA%` is
+/// unset; **new code should not use it**.
+#[cfg(target_os = "windows")]
+pub fn windows_legacy_portable_dir() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(PathBuf::from))
+}
+
 /// macOS only: open `~/Library/Application Support/Pouch/` in Finder.
 ///
 /// Used by the menubar entry (`View → Reveal Pouch Folder in Finder`,
@@ -118,11 +155,17 @@ pub fn reveal_pouch_folder() -> std::io::Result<()> {
 ///
 /// 1. **Dev mode** (`debug_assertions`): `<CARGO_MANIFEST_DIR>/../<name>` —
 ///    i.e. the in-repo directory next to `src-tauri/`. Always returned;
-///    the file/directory may or may not exist on disk yet.
+///    the file/directory may or may not exist on disk yet. **Unchanged on
+///    Windows** so `bun run dev` does not scribble into `%APPDATA%`.
 /// 2. **macOS prod** (`cfg(target_os = "macos")`, `not(debug_assertions)`):
-///    `~/Library/Application Support/Pouch/<name>`. Falls through to step 3
+///    `~/Library/Application Support/Pouch/<name>`. Falls through to step 4
 ///    if `$HOME` is unset (very unusual — but pouch should still boot).
-/// 3. **Portable prod** (Windows release; macOS fallback):
+/// 3. **Windows prod** (`cfg(target_os = "windows")`, `not(debug_assertions)`):
+///    `%APPDATA%\Pouch\<name>` (Roaming AppData). v2.1.0 promoted this
+///    from the v2.0.x portable layout — see `migrate::migrate_legacy_windows_data`
+///    for the one-shot move. Falls through to step 4 if `%APPDATA%` is
+///    unset (stripped-down CI / SYSTEM context).
+/// 4. **Portable fallback** (both platforms, last resort):
 ///    `<current_exe parent>/<name>`. If `current_exe()` itself fails we
 ///    return `None` and the caller treats it as "not found".
 ///
@@ -140,11 +183,19 @@ pub fn user_data_path(kind: UserDataKind) -> Option<PathBuf> {
         return Some(manifest_dir.join("..").join(kind.name()));
     }
 
-    // Release builds. macOS first (with $HOME fallback to the portable
-    // layout), then Windows portable.
+    // Release builds. Per-platform canonical user-data root first, then a
+    // shared portable fallback (exe sibling) so pouch still boots if the
+    // OS-level env var (HOME / APPDATA) is unset.
     #[cfg(target_os = "macos")]
     {
         if let Some(root) = macos_app_support_dir() {
+            return Some(root.join(kind.name()));
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(root) = windows_appdata_dir() {
             return Some(root.join(kind.name()));
         }
     }

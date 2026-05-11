@@ -1,16 +1,20 @@
-//! First-run bootstrap for the macOS user-data directory.
+//! First-run bootstrap for the per-user data directory (macOS + Windows).
 //!
-//! When the user double-clicks `Pouch.app` for the first time, the per-user
-//! data root at `~/Library/Application Support/Pouch/` does not yet exist —
-//! the .app bundle is read-only and ships a sample copy of `hook.conf.toml`
-//! and `inject/*.js` inside `Contents/Resources/sample/` (configured via the
-//! `bundle.resources` map in `tauri.conf.json`).
+//! When the user launches a release build of Pouch for the first time, the
+//! per-user data root does not yet exist — the installer ships a default
+//! copy of `hook.conf.toml` and `inject/*.js` inside the app bundle /
+//! installation directory under a `sample/` subfolder (configured via the
+//! `bundle.resources` map in `tauri.conf.json`). [`bootstrap_user_dir`]
+//! copies that sample tree out to the canonical user-data root with
+//! file-level idempotency: each shipped artifact is copied only when its
+//! destination is missing, so a user who edits or deletes individual
+//! files keeps that state on subsequent launches.
 //!
-//! [`bootstrap_macos_user_dir`] copies that sample tree out to
-//! `~/Library/Application Support/Pouch/` exactly once: the *very first* time
-//! the user runs the app. On every subsequent launch the directory already
-//! exists and we leave the user's edits alone — bootstrap is idempotent on
-//! non-empty existence (no merge, no overwrite, no resurrection).
+//! Per-platform user-data roots:
+//!
+//! - **macOS**: `~/Library/Application Support/Pouch/`
+//! - **Windows**: `%APPDATA%\Pouch\` (v2.1.0+; v2.0.x used the exe sibling.
+//!   See `migrate::migrate_legacy_windows_data` for the upgrade path.)
 //!
 //! Failures are logged at WARN and never abort startup: pouch's resolver
 //! falls through to an empty `startup_urls` (which the launch path then
@@ -19,66 +23,91 @@
 //! sample bundle just looks like "ran with no config" — the same fallback
 //! behaviour we already use for power-loss / disk-full corner cases.
 //!
-//! This module is **macOS-only**. Windows release builds use a "portable"
-//! layout with `hook.conf.toml` + `inject/` next to the binary, and dev
-//! builds (`debug_assertions`) read straight from the repo root — neither
-//! needs bootstrapping.
+//! Dev builds (`debug_assertions`) read straight from the repo root and
+//! do not need bootstrapping — `bootstrap_user_dir` is a no-op there.
 
-#[cfg(all(target_os = "macos", not(debug_assertions)))]
-pub use macos::bootstrap_macos_user_dir;
+#[cfg(all(
+    any(target_os = "macos", target_os = "windows"),
+    not(debug_assertions)
+))]
+pub use prod::bootstrap_user_dir;
 
-/// No-op shim for the dev / non-macOS build configurations. Lets `lib.rs`
-/// call `bootstrap::bootstrap_macos_user_dir(...)` unconditionally without a
-/// matching cfg gate at the call site.
-#[cfg(not(all(target_os = "macos", not(debug_assertions))))]
-pub fn bootstrap_macos_user_dir(_app: &tauri::AppHandle) {
-    // Dev / Windows: nothing to do.
+/// No-op shim for the dev / unsupported-platform build configurations.
+/// Lets `lib.rs` call `bootstrap::bootstrap_user_dir(...)` unconditionally
+/// without a matching cfg gate at the call site.
+#[cfg(not(all(
+    any(target_os = "macos", target_os = "windows"),
+    not(debug_assertions)
+)))]
+pub fn bootstrap_user_dir(_app: &tauri::AppHandle) {
+    // Dev / unsupported target: nothing to do.
 }
 
-#[cfg(all(target_os = "macos", not(debug_assertions)))]
-mod macos {
+#[cfg(all(
+    any(target_os = "macos", target_os = "windows"),
+    not(debug_assertions)
+))]
+mod prod {
     use std::fs;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     use tauri::{AppHandle, Manager};
     use tracing::{info, warn};
 
-    use crate::util::{macos_app_support_dir, pretty_path};
+    use crate::util::pretty_path;
 
-    /// Sub-directory inside `$RESOURCE` (i.e. `Pouch.app/Contents/Resources/`)
-    /// that holds the shipped defaults for `hook.conf.toml` and `inject/`.
-    /// Must match the destination paths in `tauri.conf.json` →
-    /// `bundle.resources`.
+    /// Sub-directory inside the Tauri-resolved `resource_dir()` (i.e.
+    /// `Pouch.app/Contents/Resources/` on macOS, `<install-dir>\resources\`
+    /// on Windows MSI) that holds the shipped defaults for `hook.conf.toml`
+    /// and `inject/`. Must match the destination paths declared in
+    /// `tauri.conf.json` → `bundle.resources`.
     const SAMPLE_DIR: &str = "sample";
 
-    /// Seed the bundled `sample/` tree into
-    /// `~/Library/Application Support/Pouch/` with **file-level**
-    /// idempotency: each shipped artifact (`hook.conf.toml`, `inject/`)
-    /// is copied only when its destination is missing. Existing user files
-    /// are never overwritten; deleted files are restored on next launch.
+    /// Resolve the per-user data root for the current platform.
+    ///
+    /// Wraps the per-OS helpers in `crate::util` so the seed logic below
+    /// stays platform-agnostic. Returns `None` when the underlying env
+    /// var (`HOME` on macOS, `APPDATA` on Windows) is unavailable — the
+    /// caller logs and bails.
+    fn user_dir() -> Option<PathBuf> {
+        #[cfg(target_os = "macos")]
+        {
+            crate::util::macos_app_support_dir()
+        }
+        #[cfg(target_os = "windows")]
+        {
+            crate::util::windows_appdata_dir()
+        }
+    }
+
+    /// Seed the bundled `sample/` tree into the per-user data root with
+    /// **file-level** idempotency: each shipped artifact (`hook.conf.toml`,
+    /// `inject/`) is copied only when its destination is missing. Existing
+    /// user files are never overwritten; deleted files are restored on
+    /// next launch.
     ///
     /// File-level (rather than directory-level) idempotency matters because
     /// other early-startup code paths — e.g. `cache_store::cache_root()` —
-    /// may have already created `user_dir` (and `user_dir/overrides/`) by
-    /// the time this runs, so checking "does `user_dir` exist?" is not a
-    /// reliable "have we bootstrapped?" signal.
+    /// may have already created the user-data dir (and `overrides/` inside
+    /// it) by the time this runs, so checking "does the user-data dir
+    /// exist?" is not a reliable "have we bootstrapped?" signal.
     ///
     /// Logs everything at INFO/WARN and never panics. Errors are warned and
     /// swallowed because pouch can still boot with no config — the launch
     /// path then prompts the user via NSAlert when `startup_urls` resolves
     /// empty.
-    pub fn bootstrap_macos_user_dir(app: &AppHandle) {
-        let Some(user_dir) = macos_app_support_dir() else {
+    pub fn bootstrap_user_dir(app: &AppHandle) {
+        let Some(user_dir) = user_dir() else {
             warn!(
                 target: "hook",
-                "[bootstrap] HOME is not set; skipping macOS user-dir bootstrap"
+                "[bootstrap] platform user-data env var (HOME / APPDATA) unset; skipping bootstrap"
             );
             return;
         };
 
         // `create_dir_all` is idempotent: a no-op if `user_dir` (or any
         // ancestor) already exists, which is the common case once
-        // `cache_store` has run.
+        // `cache_store` has run (or a migration has populated AppData).
         if let Err(e) = fs::create_dir_all(&user_dir) {
             warn!(
                 target: "hook",
@@ -89,9 +118,11 @@ mod macos {
             return;
         }
 
-        // Resolve $RESOURCE/<SAMPLE_DIR>. `resource_dir()` is the canonical
-        // Tauri v2 way to get `Pouch.app/Contents/Resources/`; it lines up
-        // with the destinations declared in `bundle.resources`.
+        // Resolve <resource_dir>/<SAMPLE_DIR>. `resource_dir()` is the
+        // canonical Tauri v2 way to reach the bundled resources tree on
+        // both macOS (`Pouch.app/Contents/Resources/`) and Windows MSI
+        // (`<install-dir>\resources\`); it lines up with the destinations
+        // declared in `bundle.resources`.
         let resource_dir = match app.path().resource_dir() {
             Ok(d) => d,
             Err(e) => {
@@ -107,7 +138,7 @@ mod macos {
         if !sample_root.is_dir() {
             warn!(
                 target: "hook",
-                "[bootstrap] sample dir not found inside .app: {} (expected from bundle.resources)",
+                "[bootstrap] sample dir not found inside installed bundle: {} (expected from bundle.resources)",
                 pretty_path(&sample_root).display()
             );
             return;

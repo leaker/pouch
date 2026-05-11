@@ -33,6 +33,7 @@ pub mod dialog;
 pub mod hook;
 pub mod http_fetcher;
 pub mod inject;
+pub mod migrate;
 #[cfg(target_os = "macos")]
 mod mitm;
 pub mod storage;
@@ -309,14 +310,23 @@ pub fn run() {
             }
         })
         .setup(|app| {
-            // 0. First-run bootstrap: on macOS prod the user-data
+            // 0a. One-shot migration: v2.0.x Windows release builds stored
+            //     `hook.conf.toml`, `inject/`, and `overrides/` next to
+            //     `pouch.exe`. v2.1.0 moves them to `%APPDATA%\Pouch\` so
+            //     user data survives scoop / MSI upgrades. Runs once
+            //     (guarded by a `.migrated-from-portable` marker file) and
+            //     is a no-op on macOS / dev builds.
+            migrate::migrate_legacy_windows_data();
+
+            // 0b. First-run bootstrap: on macOS prod the user-data
             //    directory at `~/Library/Application Support/Pouch/`
-            //    doesn't exist yet on first launch. Copy the bundled
-            //    sample (hook.conf.toml + inject/) out of
-            //    `Pouch.app/Contents/Resources/sample/` so the resolver
+            //    doesn't exist yet on first launch; on Windows prod the
+            //    new `%APPDATA%\Pouch\` is also empty for fresh installs.
+            //    Copy the bundled sample (hook.conf.toml + inject/) out of
+            //    the platform `resource_dir()/sample/` so the resolver
             //    chain in step 2 / `config::load` finds defaults to read.
-            //    No-op on dev / Windows.
-            bootstrap::bootstrap_macos_user_dir(app.handle());
+            //    No-op on dev builds.
+            bootstrap::bootstrap_user_dir(app.handle());
 
             // 1a. Load config (now that bootstrap, if applicable, has
             //     populated the user-data dir).
