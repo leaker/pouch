@@ -360,7 +360,18 @@ async fn fetch_latest_version() -> Option<String> {
         );
         return None;
     }
-    let json: serde_json::Value = match response.json().await {
+    // NOTE: we deliberately avoid `response.json()` here — it requires
+    // reqwest's `json` cargo feature, which isn't enabled in our build
+    // (reqwest is a transitive dep we don't directly own). Read the body
+    // as text and parse with `serde_json` (already a direct dep) instead.
+    let body = match response.text().await {
+        Ok(t) => t,
+        Err(e) => {
+            warn!(target: "hook", "[updater] latest.json read body failed: {e}");
+            return None;
+        }
+    };
+    let json: serde_json::Value = match serde_json::from_str(&body) {
         Ok(j) => j,
         Err(e) => {
             warn!(target: "hook", "[updater] latest.json parse failed: {e}");
