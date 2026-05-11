@@ -167,6 +167,22 @@ impl HttpHandler for PouchHandler {
             return res;
         };
 
+        // Decompress before collect: hudsucker doesn't auto-decode, so without
+        // this the cached bytes are gzip/br wire payload while Content-Encoding
+        // is stripped by FORWARD_HEADER_BLACKLIST → HIT replay renders garbage.
+        let res = match hudsucker::decode_response(res) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(
+                    target: "hook",
+                    "[mitm] decode_response_failed url={} err={} (passthrough, skip cache)",
+                    short_url(&meta.url),
+                    e
+                );
+                return Response::new(Body::empty());
+            }
+        };
+
         // Only persist 2xx responses. Anything else just streams through.
         if !res.status().is_success() {
             tracing::debug!(
