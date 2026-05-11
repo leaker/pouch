@@ -28,7 +28,13 @@
                  InstallScope="perUser"
                  SummaryCodepage="!(loc.TauriCodepage)"/>
 
-        <Property Id="ALLUSERS" Value=""/>
+        <!-- Per-user install signaling. WiX/candle rejects Value="" on
+             <Property> with IllegalEmptyAttributeValue, so we set ALLUSERS
+             without a Value attribute (matches WiX 3's own PerUserMsi test
+             fixture) and pair it with MSIINSTALLPERUSER=1 for Windows
+             Installer 5+ single-package authoring. Together with
+             InstallScope="perUser" above, this forces a per-user MSI. -->
+        <Property Id="ALLUSERS" Secure="yes"/>
         <Property Id="MSIINSTALLPERUSER" Value="1"/>
 
         <!-- https://docs.microsoft.com/en-us/windows/win32/msi/reinstallmode -->
