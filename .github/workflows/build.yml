@@ -109,6 +109,12 @@
 #       Any random throwaway string. Used only to lock/unlock the temporary
 #       build keychain we create on the runner; it never leaves the job.
 #
+#   PACKAGE_MANAGER_BUMP_TOKEN
+#       Personal Access Token used only by the release job after the GitHub
+#       Release assets are published. It pushes manifest updates to
+#       leaker/homebrew-tap and leaker/scoop-bucket. Do not use the default
+#       GITHUB_TOKEN for these downstream repos.
+#
 # Tooling versions are pinned to current stable major tags. Bump deliberately.
 # =============================================================================
 
@@ -129,6 +135,72 @@ permissions:
 
 jobs:
   # ---------------------------------------------------------------------------
+  # Release version guard.
+  #
+  # A `vX.Y.Z` tag must point at a commit whose checked-in app metadata already
+  # says `X.Y.Z`. This catches the failure mode where a tag is pushed without
+  # first following RELEASING.md's version-bump step.
+  # ---------------------------------------------------------------------------
+  validate_release_version:
+    name: Validate release version metadata
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Compare tag with checked-in version files
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          import json
+          import os
+          import re
+          import sys
+          import tomllib
+          from pathlib import Path
+
+          tag = os.environ["REF_NAME"]
+          if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?", tag):
+              print(f"::error::Release tag must look like vX.Y.Z or vX.Y.Z-suffix, got {tag}")
+              sys.exit(1)
+
+          expected = tag.removeprefix("v")
+          checks = []
+
+          tauri_conf = json.loads(Path("src-tauri/tauri.conf.json").read_text())
+          checks.append(("src-tauri/tauri.conf.json", tauri_conf.get("version")))
+
+          cargo_toml = tomllib.loads(Path("src-tauri/Cargo.toml").read_text())
+          checks.append(("src-tauri/Cargo.toml", cargo_toml["package"].get("version")))
+
+          cargo_lock = tomllib.loads(Path("src-tauri/Cargo.lock").read_text())
+          pouch_packages = [
+              package for package in cargo_lock.get("package", [])
+              if package.get("name") == "pouch"
+          ]
+          if len(pouch_packages) != 1:
+              print(f"::error::Expected exactly one pouch package in src-tauri/Cargo.lock, found {len(pouch_packages)}")
+              sys.exit(1)
+          checks.append(("src-tauri/Cargo.lock package pouch", pouch_packages[0].get("version")))
+
+          failed = False
+          for source, actual in checks:
+              if actual != expected:
+                  print(f"::error::{source} version {actual!r} does not match tag {tag} ({expected})")
+                  failed = True
+              else:
+                  print(f"{source}: {actual}")
+
+          if failed:
+              sys.exit(1)
+          print(f"All checked-in release version files match {tag}.")
+          PY
+
+  # ---------------------------------------------------------------------------
   # macOS build.
   #
   # Two modes, gated by the trigger:
@@ -141,6 +213,8 @@ jobs:
   # ---------------------------------------------------------------------------
   build-macos:
     name: Build macOS (.dmg)
+    needs: [validate_release_version]
+    if: ${{ always() && !cancelled() && (needs.validate_release_version.result == 'success' || needs.validate_release_version.result == 'skipped') }}
     runs-on: macos-latest
 
     # Hoist the cert secret to job-level env so the keychain step's `if:`
@@ -234,6 +308,34 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      - name: Validate macOS app bundle version metadata
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION="${REF_NAME#v}"
+          INFO_PLIST="src-tauri/target/universal-apple-darwin/release/bundle/macos/Pouch.app/Contents/Info.plist"
+
+          if [ ! -f "$INFO_PLIST" ]; then
+            echo "::error::Missing generated app bundle Info.plist at $INFO_PLIST"
+            exit 1
+          fi
+
+          SHORT_VERSION="$(plutil -extract CFBundleShortVersionString raw -o - "$INFO_PLIST")"
+          BUNDLE_VERSION="$(plutil -extract CFBundleVersion raw -o - "$INFO_PLIST")"
+
+          if [ "$SHORT_VERSION" != "$VERSION" ]; then
+            echo "::error::CFBundleShortVersionString ($SHORT_VERSION) does not match tag version $VERSION"
+            exit 1
+          fi
+          if [ "$BUNDLE_VERSION" != "$VERSION" ]; then
+            echo "::error::CFBundleVersion ($BUNDLE_VERSION) does not match tag version $VERSION"
+            exit 1
+          fi
+
+          echo "Generated Info.plist version metadata matches $REF_NAME."
 
       # ----------------------------------------------------------------------
       # Debug: dump the bundler output tree so the first CI run records the
@@ -345,6 +447,8 @@ jobs:
   # ---------------------------------------------------------------------------
   build-windows:
     name: Build Windows (portable .exe + .zip)
+    needs: [validate_release_version]
+    if: ${{ always() && !cancelled() && (needs.validate_release_version.result == 'success' || needs.validate_release_version.result == 'skipped') }}
     runs-on: windows-latest
 
     steps:
@@ -613,3 +717,145 @@ jobs:
             artifacts/Pouch-*.exe
             artifacts/Pouch-*.zip
             artifacts/latest.json
+
+      # ----------------------------------------------------------------------
+      # Package manager manifest bump.
+      #
+      # This runs inside the same release job, after softprops/action-gh-release
+      # has finished uploading the .dmg / .zip assets. We hash the already
+      # downloaded local artifacts instead of re-downloading them from the
+      # GitHub Release, then push downstream manifest updates with the
+      # cross-repo PACKAGE_MANAGER_BUMP_TOKEN.
+      #
+      # Pre-release tags (`-rc`, `-beta`, `-alpha`) intentionally skip this
+      # stable-channel bump, matching the Release prerelease classification
+      # above.
+      # ----------------------------------------------------------------------
+      - name: Validate package manager bump token
+        if: ${{ startsWith(github.ref, 'refs/tags/v') && !(contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha')) }}
+        env:
+          PACKAGE_MANAGER_BUMP_TOKEN: ${{ secrets.PACKAGE_MANAGER_BUMP_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "$PACKAGE_MANAGER_BUMP_TOKEN" ]; then
+            echo "::error::PACKAGE_MANAGER_BUMP_TOKEN is required to push Homebrew/Scoop manifest updates."
+            exit 1
+          fi
+
+      - name: Compute package manager sha256 values
+        id: package_sha
+        if: ${{ startsWith(github.ref, 'refs/tags/v') && !(contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha')) }}
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION="${REF_NAME#v}"
+          DMG_PATH="artifacts/Pouch-${VERSION}.dmg"
+          ZIP_PATH="artifacts/Pouch-${VERSION}.zip"
+
+          if [ ! -f "$DMG_PATH" ]; then
+            echo "::error::Missing $DMG_PATH"
+            exit 1
+          fi
+          if [ ! -f "$ZIP_PATH" ]; then
+            echo "::error::Missing $ZIP_PATH"
+            exit 1
+          fi
+
+          DMG_SHA=$(shasum -a 256 "$DMG_PATH" | awk '{print $1}')
+          ZIP_SHA=$(shasum -a 256 "$ZIP_PATH" | awk '{print $1}')
+          {
+            echo "version=$VERSION"
+            echo "dmg_sha256=$DMG_SHA"
+            echo "zip_sha256=$ZIP_SHA"
+          } >> "$GITHUB_OUTPUT"
+          echo "dmg sha256: $DMG_SHA"
+          echo "zip sha256: $ZIP_SHA"
+
+      - name: Checkout homebrew-tap
+        if: ${{ startsWith(github.ref, 'refs/tags/v') && !(contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha')) }}
+        uses: actions/checkout@v4
+        with:
+          repository: leaker/homebrew-tap
+          token: ${{ secrets.PACKAGE_MANAGER_BUMP_TOKEN }}
+          path: tap
+
+      - name: Bump Cask
+        if: ${{ startsWith(github.ref, 'refs/tags/v') && !(contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha')) }}
+        env:
+          VERSION: ${{ steps.package_sha.outputs.version }}
+          DMG_SHA: ${{ steps.package_sha.outputs.dmg_sha256 }}
+        run: |
+          set -euo pipefail
+          cd tap
+          sed -i -E 's|^  version ".*"|  version "'"$VERSION"'"|' Casks/pouch.rb
+          sed -i -E '0,/^  sha256 ".*"/{s|^  sha256 ".*"|  sha256 "'"$DMG_SHA"'"|}' Casks/pouch.rb
+          if git diff --quiet; then
+            echo "No changes to Cask -- version already at $VERSION."
+            exit 0
+          fi
+          git diff Casks/pouch.rb
+
+      - name: Commit & push homebrew-tap
+        if: ${{ startsWith(github.ref, 'refs/tags/v') && !(contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha')) }}
+        env:
+          VERSION: ${{ steps.package_sha.outputs.version }}
+        run: |
+          set -euo pipefail
+          cd tap
+          if git diff --quiet; then
+            echo "No diff -- skipping commit."
+            exit 0
+          fi
+          git -c user.name="leaker[bot]" -c user.email="claude@leelib.com" \
+            commit -am "pouch: bump to ${VERSION}"
+          git push origin HEAD:main
+
+      - name: Checkout scoop-bucket
+        if: ${{ startsWith(github.ref, 'refs/tags/v') && !(contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha')) }}
+        uses: actions/checkout@v4
+        with:
+          repository: leaker/scoop-bucket
+          token: ${{ secrets.PACKAGE_MANAGER_BUMP_TOKEN }}
+          path: bucket
+
+      - name: Bump Scoop manifest
+        if: ${{ startsWith(github.ref, 'refs/tags/v') && !(contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha')) }}
+        env:
+          VERSION: ${{ steps.package_sha.outputs.version }}
+          ZIP_SHA: ${{ steps.package_sha.outputs.zip_sha256 }}
+        run: |
+          set -euo pipefail
+          cd bucket
+          python3 <<'PY'
+          import json, os, pathlib
+          v   = os.environ["VERSION"]
+          sha = os.environ["ZIP_SHA"]
+          p   = pathlib.Path("bucket/pouch.json")
+          m   = json.loads(p.read_text())
+          m["version"] = v
+          arch = m["architecture"]["64bit"]
+          arch["url"]  = f"https://github.com/leaker/pouch/releases/download/v{v}/Pouch-{v}.zip"
+          arch["hash"] = sha
+          p.write_text(json.dumps(m, indent=4) + "\n")
+          PY
+          if git diff --quiet; then
+            echo "No changes to manifest -- version already at $VERSION."
+            exit 0
+          fi
+          git diff bucket/pouch.json
+
+      - name: Commit & push scoop-bucket
+        if: ${{ startsWith(github.ref, 'refs/tags/v') && !(contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha')) }}
+        env:
+          VERSION: ${{ steps.package_sha.outputs.version }}
+        run: |
+          set -euo pipefail
+          cd bucket
+          if git diff --quiet; then
+            echo "No diff -- skipping commit."
+            exit 0
+          fi
+          git -c user.name="leaker[bot]" -c user.email="claude@leelib.com" \
+            commit -am "pouch: bump to ${VERSION}"
+          git push origin HEAD:main

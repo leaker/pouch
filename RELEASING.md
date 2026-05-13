@@ -22,17 +22,20 @@ It is intended for the maintainer. End users do not need to read this.
    git push origin main
    git push origin vX.Y.Z
    ```
-4. Wait. From here everything is automated:
+4. The tag build first verifies that the tag version matches the checked-in
+   versions in `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`, and
+   `src-tauri/Cargo.lock`; the macOS build also verifies the generated app
+   bundle `Info.plist` before publishing artifacts.
+5. Wait. From here everything is automated:
    - The tag push triggers `.github/workflows/build.yml`, which builds the
      macOS `.dmg` (signed + notarized) and Windows `.exe` / `.zip`, then
      publishes a GitHub Release with all three assets attached.
-   - The moment the Release is published, GitHub fires a
-     `release.published` event that triggers
-     `.github/workflows/bump-package-managers.yml`. That workflow downloads
-     `Pouch-X.Y.Z.dmg` + `Pouch-X.Y.Z.zip`, computes their sha256, and
-     pushes a `pouch: bump to X.Y.Z` commit to `leaker/homebrew-tap` and
+   - In the same release job, immediately after the Release assets are
+     uploaded, `build.yml` computes sha256 values from the local
+     `Pouch-X.Y.Z.dmg` + `Pouch-X.Y.Z.zip` artifacts and pushes a
+     `pouch: bump to X.Y.Z` commit to `leaker/homebrew-tap` and
      `leaker/scoop-bucket`.
-5. End users running `brew upgrade --cask pouch` or `scoop update pouch`
+6. End users running `brew upgrade --cask pouch` or `scoop update pouch`
    now resolve to the new version within seconds.
 
 The whole flow is hands-off after step 3. If anything goes wrong at the
@@ -43,10 +46,11 @@ below.
 
 ## One-time setup: `PACKAGE_MANAGER_BUMP_TOKEN`
 
-`bump-package-managers.yml` needs to push commits into the homebrew-tap
+The release job in `build.yml` needs to push commits into the homebrew-tap
 and scoop-bucket repos. The default `GITHUB_TOKEN` is scoped only to the
-workflow's own repo (`leaker/pouch`), so cross-repo pushes require a
-Personal Access Token configured as a repository secret.
+workflow's own repo (`leaker/pouch`), and releases created with it do not
+trigger a second `release.published` workflow. Cross-repo pushes therefore
+require a Personal Access Token configured as a repository secret.
 
 ### Option A — classic PAT (simpler)
 
@@ -83,8 +87,8 @@ reminder for 30 days before expiry.
 
 ### Verifying setup
 
-Once the secret is configured, you can dry-run the bump workflow against
-the latest existing release without cutting a new tag:
+Once the secret is configured, you can test the manual backfill workflow
+against the latest existing release without cutting a new tag:
 
 - Go to `leaker/pouch` → **Actions** → **Bump package manager
   manifests** → **Run workflow**.
@@ -99,7 +103,9 @@ commit" if the manifests are already up to date).
 
 ## Manual / backfill bump
 
-Use the `workflow_dispatch` trigger when you need to:
+Normal releases do not use this workflow; `build.yml` updates the package
+manager manifests directly after publishing release assets. Use the
+`workflow_dispatch` trigger when you need to:
 
 - Re-run the bump after rotating the PAT (the original run failed
   because the token had expired).
@@ -122,8 +128,8 @@ cleanly), so it is safe to retry.
 
 Tags like `v2.0.0-rc1` go through the same build pipeline and produce
 the same `Pouch-2.0.0-rc1.dmg` / `Pouch-2.0.0-rc1.zip` assets. However,
-the bump workflow **deliberately skips** any release that is marked as
-`prerelease` or `draft` on GitHub — we don't want an rc build to
+the release job **deliberately skips** the Homebrew / Scoop bump for
+`-rc`, `-beta`, and `-alpha` tags — we don't want a pre-release build to
 displace the stable version in Homebrew / Scoop.
 
 If you want to publish a pre-release through the package managers
@@ -149,10 +155,12 @@ live in the project README, not here.
 - **`.github/workflows/build.yml`** — triggers on `push: tags: ['v*']`
   and on `workflow_dispatch`. Builds the macOS `.dmg` (universal, signed
   + notarized) and the Windows portable `.exe` + `.zip`, then publishes
-  a GitHub Release with all three attached. See the comments at the top
-  of that file for the full secret list (`APPLE_*`, `KEYCHAIN_PASSWORD`).
-- **`.github/workflows/bump-package-managers.yml`** — triggers on
-  `release: types: [published]` (after `build.yml` has finished
-  uploading) and on `workflow_dispatch`. Downloads the just-published
-  assets, computes sha256, rewrites both downstream manifests, commits +
+  a GitHub Release with all assets attached. For stable tags, the same
+  release job computes sha256 values from the local `.dmg` / `.zip`
+  artifacts, rewrites both downstream manifests, commits + pushes. See
+  the comments at the top of that file for the full secret list
+  (`APPLE_*`, `KEYCHAIN_PASSWORD`, `PACKAGE_MANAGER_BUMP_TOKEN`).
+- **`.github/workflows/bump-package-managers.yml`** — manual
+  `workflow_dispatch` backfill only. Downloads assets from an existing
+  Release, computes sha256, rewrites both downstream manifests, commits +
   pushes. Needs `PACKAGE_MANAGER_BUMP_TOKEN` (this file).

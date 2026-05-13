@@ -1,38 +1,28 @@
 # =============================================================================
-# Auto-bump Homebrew tap and Scoop bucket when a GitHub Release is published.
+# Manually backfill Homebrew tap and Scoop bucket manifests for an existing
+# GitHub Release.
 #
-# Why this is a separate workflow
-# -------------------------------
-# `build.yml` is the producer: it builds the macOS .dmg + Windows .exe / .zip
-# and publishes a GitHub Release via softprops/action-gh-release. The moment
-# that Release goes from "creating" to "published", the asset URLs
-# (https://github.com/leaker/pouch/releases/download/v<ver>/Pouch-<ver>.<ext>)
-# become stable and SHA256-addressable.
+# Why this remains separate from build.yml
+# ----------------------------------------
+# Normal releases are handled directly by `.github/workflows/build.yml`: after
+# it publishes the GitHub Release assets, the same release job hashes the local
+# .dmg / .zip artifacts and pushes manifest updates to leaker/homebrew-tap and
+# leaker/scoop-bucket.
 #
-# This workflow is the consumer of that event. It:
-#   1. Resolves the published tag and strips the leading `v`.
+# This workflow is kept only as an operator backfill tool. It:
+#   1. Resolves a requested tag, or the latest published Release.
 #   2. Downloads `Pouch-<version>.dmg` (macOS) and `Pouch-<version>.zip`
-#      (Windows) from the just-published Release, computes their sha256.
+#      (Windows) from that Release, computes their sha256.
 #   3. Checks out leaker/homebrew-tap, rewrites Casks/pouch.rb's `version` +
 #      `sha256` fields, commits with author `leaker[bot]`, pushes to main.
 #   4. Checks out leaker/scoop-bucket, rewrites bucket/pouch.json's
 #      `version`, `architecture.64bit.url`, `architecture.64bit.hash`,
 #      commits, pushes to main.
 #
-# Net result: `brew upgrade --cask pouch` and `scoop update pouch` resolve to
-# the new release within seconds of the release going live, with no manual
-# bumping in either downstream repo.
-#
-# Trigger choice: `release.published` (NOT `release.created`)
-# ----------------------------------------------------------
-# `release.created` fires before the action-gh-release upload step finishes.
-# At that point `gh release download` would race against the upload and
-# either 404 or fetch a partial asset. `release.published` only fires once
-# the Release transitions to its final published state, after all assets
-# are uploaded. That's what we want.
-#
-# Tag pushes (`push: tags`) would be even earlier and are explicitly wrong
-# for this job -- by then we don't even know if the build will succeed.
+# There is intentionally no `release.published` trigger here. Releases created
+# by build.yml use the default GITHUB_TOKEN, and GitHub does not recursively
+# trigger another workflow from that token. Keeping this workflow manual also
+# avoids a duplicate bump if the release producer ever switches tokens.
 #
 # Cross-repo push needs a PAT, not GITHUB_TOKEN
 # ---------------------------------------------
@@ -45,10 +35,10 @@
 #
 # Manual / backfill trigger
 # -------------------------
-# `workflow_dispatch` is enabled with an optional `tag` input so a
-# maintainer can re-run the bump against any past release (e.g. after a
-# token rotation, after fixing the manifests, or when first wiring this up
-# against a release that predates this workflow).
+# `workflow_dispatch` has an optional `tag` input so a maintainer can re-run
+# the bump against any past release (e.g. after a token rotation, after fixing
+# the manifests, or when first wiring this up against a release that predates
+# this workflow).
 #
 # Idempotency
 # -----------
@@ -69,8 +59,6 @@
 name: Bump package manager manifests
 
 on:
-  release:
-    types: [published]
   workflow_dispatch:
     inputs:
       tag:
@@ -86,18 +74,12 @@ permissions:
 jobs:
   bump:
     name: Bump tap + bucket
-    # Skip drafts and prereleases so an `rc` / `beta` tag doesn't downgrade
-    # the cask / bucket for end users on the stable channel. `workflow_dispatch`
-    # has no release context, so `prerelease` / `draft` are null and the
-    # negation still permits manual runs.
-    if: ${{ github.event_name == 'workflow_dispatch' || (!github.event.release.prerelease && !github.event.release.draft) }}
     runs-on: ubuntu-latest
 
     steps:
       # ----------------------------------------------------------------------
       # Resolve which tag we're bumping to.
       #
-      #   - `release` event: use github.event.release.tag_name (authoritative).
       #   - `workflow_dispatch` with explicit `tag` input: use that.
       #   - `workflow_dispatch` with empty input: fall back to the latest
       #     published release via `gh release view`.
@@ -110,10 +92,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           INPUT_TAG: ${{ inputs.tag }}
-          EVENT_TAG: ${{ github.event.release.tag_name }}
         run: |
           set -euo pipefail
-          TAG="${EVENT_TAG:-$INPUT_TAG}"
+          TAG="$INPUT_TAG"
           if [ -z "$TAG" ]; then
             TAG=$(gh release view --repo "${GITHUB_REPOSITORY}" --json tagName -q .tagName)
           fi

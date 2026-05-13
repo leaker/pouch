@@ -372,13 +372,17 @@ mod tests {
 
     #[test]
     fn config_file_parses_startup_urls() {
-        let parsed: ConfigFile = toml::from_str(
-            r#"startup_urls = ["https://a.example/", "http://b.example/"]"#,
-        )
-        .unwrap();
+        let parsed: ConfigFile =
+            toml::from_str(r#"startup_urls = ["https://a.example/", "http://b.example/"]"#)
+                .unwrap();
         assert_eq!(
             parsed.startup_urls.as_deref(),
-            Some(&["https://a.example/".to_string(), "http://b.example/".to_string()][..])
+            Some(
+                &[
+                    "https://a.example/".to_string(),
+                    "http://b.example/".to_string()
+                ][..]
+            )
         );
     }
 
@@ -483,8 +487,7 @@ mod tests {
 
     #[test]
     fn updater_config_explicit_false_disables() {
-        let parsed: ConfigFile =
-            toml::from_str("[updater]\nauto_check = false\n").unwrap();
+        let parsed: ConfigFile = toml::from_str("[updater]\nauto_check = false\n").unwrap();
         let u = parsed.updater.expect("updater section present");
         assert!(!u.auto_check);
     }
@@ -503,8 +506,7 @@ mod tests {
         // `deny_unknown_fields` keeps the schema honest — typos in field
         // names should error at load time instead of silently ignoring
         // user intent (e.g. `auto-check` with a hyphen).
-        let err =
-            toml::from_str::<ConfigFile>("[updater]\nauto-check = false\n").unwrap_err();
+        let err = toml::from_str::<ConfigFile>("[updater]\nauto-check = false\n").unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("auto-check") || msg.contains("unknown"),
