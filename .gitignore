@@ -56,3 +56,9 @@ AGENTS.md
 # historical content remains in git history before this commit)
 tasks/
 tests/
+
+# Env
+.env
+
+# log
+logs/
