@@ -82,6 +82,8 @@ use windows::core::{Interface, HSTRING, PWSTR};
 use windows::Win32::UI::Shell::SHCreateMemStream;
 
 use crate::hook::policy::{self, Decision};
+use crate::hook::protocol_bypass;
+use crate::hook::websocket;
 
 /// Multi-thread tokio runtime used to drive `policy::evaluate` from the
 /// `WebResourceRequested` handler.
@@ -231,6 +233,30 @@ fn handle_request<R: Runtime>(
     // Only GET is cacheable / hookable. Returning without calling SetResponse
     // lets the webview perform the request natively.
     if !method.eq_ignore_ascii_case("GET") {
+        return;
+    }
+
+    // WebSocket opening handshakes must not enter the cache/fetch policy.
+    // Leaving the event without SetResponse lets WebView2 continue its
+    // native upgrade path.
+    if websocket::is_websocket_upgrade(&header_map) {
+        debug!(
+            target: "hook",
+            "[hook][win] decision=websocket/bypass_cache method={} url={}",
+            method,
+            url
+        );
+        return;
+    }
+
+    if let Some(reason) = protocol_bypass::request_bypass_reason(&header_map) {
+        debug!(
+            target: "hook",
+            "[hook][win] decision=protocol/bypass_cache reason={} method={} url={}",
+            reason.as_str(),
+            method,
+            url
+        );
         return;
     }
 

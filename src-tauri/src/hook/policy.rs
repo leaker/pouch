@@ -31,6 +31,7 @@ use tracing::{debug, info, trace, warn};
 
 use crate::cache_store::{self, CachePolicy, Metadata};
 use crate::hook::ignore_filter;
+use crate::hook::protocol_bypass;
 use crate::http_fetcher;
 
 /// Maximum time we wait for an upstream GET before falling back to bypass.
@@ -121,9 +122,7 @@ fn headers_for_sidecar(extras: &[(String, String)]) -> Vec<(String, String)> {
 /// `Set-Cookie`) emit one entry per value so platform layers can decide
 /// whether to join with `\r\n` (Windows) or special-case at delivery time
 /// (macOS NSHTTPURLResponse).
-fn forward_response_headers(
-    headers: &http::HeaderMap,
-) -> (Option<String>, Vec<(String, String)>) {
+fn forward_response_headers(headers: &http::HeaderMap) -> (Option<String>, Vec<(String, String)>) {
     let content_type = headers
         .get(http::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
@@ -256,6 +255,19 @@ async fn fetch_only(url: &str, request_headers: &http::HeaderMap) -> Decision {
         None => return Decision::Bypass,
     };
 
+    if let Some(reason) =
+        protocol_bypass::response_bypass_reason(response.status(), response.headers())
+    {
+        warn!(
+            target: "hook",
+            "BYPASS reason=protocol_{} url={} status={} (skip cache, skip body read)",
+            reason.as_str(),
+            url,
+            response.status()
+        );
+        return Decision::Bypass;
+    }
+
     let (content_type, extra_headers) = forward_response_headers(response.headers());
 
     let body_bytes = match response.bytes().await {
@@ -283,6 +295,19 @@ async fn fetch_and_cache(
         Some(r) => r,
         None => return Decision::Bypass,
     };
+
+    if let Some(reason) =
+        protocol_bypass::response_bypass_reason(response.status(), response.headers())
+    {
+        warn!(
+            target: "hook",
+            "BYPASS reason=protocol_{} url={} status={} (skip cache, skip body read)",
+            reason.as_str(),
+            url,
+            response.status()
+        );
+        return Decision::Bypass;
+    }
 
     // Snapshot the response headers we care about before consuming the body.
     let headers = response.headers().clone();
@@ -424,10 +449,7 @@ mod tests {
         assert_eq!(ct.as_deref(), Some("text/html; charset=utf-8"));
 
         // Easy-to-read shape check: collect names lower-case for assertions.
-        let lc_names: Vec<String> = extras
-            .iter()
-            .map(|(n, _)| n.to_ascii_lowercase())
-            .collect();
+        let lc_names: Vec<String> = extras.iter().map(|(n, _)| n.to_ascii_lowercase()).collect();
 
         // Kept.
         assert!(lc_names.iter().any(|n| n == "cache-control"));

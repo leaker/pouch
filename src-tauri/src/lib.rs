@@ -57,6 +57,9 @@ use crate::storage::WindowState;
 use crate::util::{DEFAULT_WINDOW_HEIGHT, DEFAULT_WINDOW_WIDTH};
 use tracing_subscriber::{fmt::time::ChronoLocal, EnvFilter};
 
+const DEFAULT_APP_LOG_FILTER: &str = "hook=info,pouch_lib=info,pouch=info";
+const APP_LOG_TARGETS: &[&str] = &["hook", "pouch_lib", "pouch"];
+
 /// Menu item id for the "Open DevTools" entry. Matched in `on_menu_event` to
 /// dispatch into [`tauri::WebviewWindow::open_devtools`]. macOS-only because
 /// Pouch no longer registers a window menu on Windows (it sat inside the
@@ -1114,9 +1117,11 @@ pub(crate) fn page_load_handler(
 
 /// Initialise the global tracing subscriber.
 ///
-/// Reads `TAURI_HOOK_LOG` (e.g. `info`, `tauri_hook=debug`) and falls back to
-/// `info`. Using `try_init` so a host application that already installed a
-/// subscriber (tests, embedding) doesn't panic.
+/// Reads `TAURI_HOOK_LOG` (application targets only) and falls back to
+/// `hook=info,pouch_lib=info,pouch=info`. Set `POUCH_LOG_FILTER` for a raw
+/// advanced `EnvFilter` when dependency logs are explicitly needed. Using
+/// `try_init` so a host application that already installed a subscriber
+/// (tests, embedding) doesn't panic.
 fn init_tracing() {
     // Per-layer filtering: EnvFilter (TAURI_HOOK_LOG) gates only the fmt
     // layer, so user-supplied filters like `hook=debug` don't accidentally
@@ -1126,8 +1131,7 @@ fn init_tracing() {
     use tracing_subscriber::util::SubscriberInitExt;
     use tracing_subscriber::Layer;
 
-    let env_filter =
-        EnvFilter::try_from_env("TAURI_HOOK_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
+    let env_filter = tracing_filter_from_env();
     let fmt_layer = tracing_subscriber::fmt::layer()
         .with_timer(ChronoLocal::new("%Y-%m-%d %H:%M:%S".to_string()))
         .with_filter(env_filter);
@@ -1138,6 +1142,135 @@ fn init_tracing() {
     #[cfg(target_os = "macos")]
     let registry = registry.with(crate::mitm::LearnerLayer);
     let _ = registry.try_init();
+}
+
+fn tracing_filter_from_env() -> EnvFilter {
+    if let Ok(raw_filter) = std::env::var("POUCH_LOG_FILTER") {
+        if let Ok(filter) = EnvFilter::try_new(raw_filter.trim()) {
+            return filter;
+        }
+        tracing::warn!(
+            target: "hook",
+            "invalid POUCH_LOG_FILTER ignored; falling back to TAURI_HOOK_LOG application filter"
+        );
+    }
+
+    let filter = app_log_filter_directives(std::env::var("TAURI_HOOK_LOG").ok().as_deref());
+    EnvFilter::try_new(filter).unwrap_or_else(|_| EnvFilter::new(DEFAULT_APP_LOG_FILTER))
+}
+
+fn app_log_filter_directives(raw: Option<&str>) -> String {
+    let Some(raw) = raw.map(str::trim).filter(|raw| !raw.is_empty()) else {
+        return DEFAULT_APP_LOG_FILTER.to_string();
+    };
+
+    if is_level_directive(raw) {
+        return app_targets_at(raw);
+    }
+
+    let mut directives = Vec::new();
+    for token in raw
+        .split(',')
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+    {
+        if is_level_directive(token) {
+            directives.push(app_targets_at(token));
+        } else if is_app_target_directive(token) {
+            directives.push(token.to_string());
+        }
+    }
+
+    if directives.is_empty() {
+        DEFAULT_APP_LOG_FILTER.to_string()
+    } else {
+        directives.join(",")
+    }
+}
+
+fn app_targets_at(level: &str) -> String {
+    APP_LOG_TARGETS
+        .iter()
+        .map(|target| format!("{target}={level}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn is_level_directive(value: &str) -> bool {
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "off" | "error" | "warn" | "info" | "debug" | "trace"
+    )
+}
+
+fn is_app_target_directive(value: &str) -> bool {
+    let target = value
+        .split_once('=')
+        .map(|(target, _)| target)
+        .unwrap_or(value);
+    let target = target
+        .split_once('[')
+        .map(|(target, _)| target)
+        .unwrap_or(target)
+        .trim();
+
+    APP_LOG_TARGETS
+        .iter()
+        .any(|app_target| target == *app_target || target.starts_with(&format!("{app_target}::")))
+}
+
+#[cfg(test)]
+mod tracing_filter_tests {
+    use super::{app_log_filter_directives, DEFAULT_APP_LOG_FILTER};
+    use tracing_subscriber::EnvFilter;
+
+    #[test]
+    fn default_filter_is_application_scoped() {
+        let filter = app_log_filter_directives(None);
+
+        assert_eq!(filter, DEFAULT_APP_LOG_FILTER);
+        EnvFilter::try_new(filter).expect("default app log filter should parse");
+    }
+
+    #[test]
+    fn bare_level_expands_to_application_targets_only() {
+        let filter = app_log_filter_directives(Some("debug"));
+
+        assert_eq!(filter, "hook=debug,pouch_lib=debug,pouch=debug");
+        assert!(!filter.contains("h2"));
+        assert!(!filter.contains("hyper"));
+        assert!(!filter.contains("tokio_util"));
+        EnvFilter::try_new(filter).expect("expanded bare level should parse");
+    }
+
+    #[test]
+    fn application_directive_does_not_enable_dependency_targets() {
+        let filter = app_log_filter_directives(Some("hook=trace"));
+
+        assert_eq!(filter, "hook=trace");
+        assert!(!filter.contains("h2"));
+        assert!(!filter.contains("hyper"));
+        assert!(!filter.contains("tokio_util"));
+        EnvFilter::try_new(filter).expect("hook directive should parse");
+    }
+
+    #[test]
+    fn tauri_hook_log_drops_dependency_frame_directives() {
+        let filter = app_log_filter_directives(Some("hook=trace,h2::codec=debug,hyper=trace"));
+
+        assert_eq!(filter, "hook=trace");
+        assert!(!filter.contains("h2"));
+        assert!(!filter.contains("hyper"));
+        EnvFilter::try_new(filter).expect("sanitized app log filter should parse");
+    }
+
+    #[test]
+    fn dependency_only_tauri_hook_log_falls_back_to_app_default() {
+        let filter = app_log_filter_directives(Some("h2::codec=debug,tokio_util=trace"));
+
+        assert_eq!(filter, DEFAULT_APP_LOG_FILTER);
+        EnvFilter::try_new(filter).expect("fallback app log filter should parse");
+    }
 }
 
 /// Install a process-wide panic hook that funnels panics through `tracing`
