@@ -226,6 +226,10 @@ pub struct Metadata {
 
 static CACHE_ROOT: OnceLock<PathBuf> = OnceLock::new();
 
+#[cfg(test)]
+pub(crate) static CACHE_ROOT_OVERRIDE_LOCK: tokio::sync::Mutex<()> =
+    tokio::sync::Mutex::const_new(());
+
 /// Returns the absolute path of the cache root.
 ///
 /// Resolution chain (see [`crate::util::user_data_dir`]):
@@ -409,6 +413,7 @@ mod tests {
         Fut: std::future::Future<Output = R>,
     {
         let tmp = TempDir::new().expect("tempdir");
+        let _guard = CACHE_ROOT_OVERRIDE_LOCK.lock().await;
         // Safe in single-threaded tokio test (`flavor = current_thread` default).
         std::env::set_var("CACHE_ROOT_OVERRIDE", tmp.path());
         let result = f(tmp.path().to_path_buf()).await;

@@ -534,38 +534,51 @@ impl HttpHandler for PouchHandler {
                 );
             }
             CachePolicy::Store => {
-                cache_decision = "store".to_string();
-                let sidecar_headers = headers_for_sidecar(&forwarded);
-                let metadata = Metadata {
-                    original_url: meta.url.clone(),
-                    content_type: content_type.clone(),
-                    etag,
-                    last_modified,
-                    saved_at: Utc::now().to_rfc3339(),
-                    forwarded_headers: sidecar_headers,
-                };
-                let cache_write_started_at = Instant::now();
-                if let Err(e) = cache_store::write(&meta.cache_key, &body_bytes, &metadata).await {
-                    cache_write_ms = Some(elapsed_ms(cache_write_started_at));
-                    cache_decision = "store_failed".to_string();
-                    tracing::warn!(
+                if should_skip_cache_write_for_body(&body_bytes) {
+                    cache_decision = "skip:empty_body".to_string();
+                    tracing::debug!(
                         target: "hook",
-                        "[mitm] cache write failed id={} key={} err={} cache_write_ms={} (serving fresh response anyway)",
-                        meta.id,
-                        meta.cache_key,
-                        e,
-                        cache_write_ms.unwrap_or_default()
-                    );
-                } else {
-                    cache_write_ms = Some(elapsed_ms(cache_write_started_at));
-                    tracing::info!(
-                        target: "hook",
-                        "[mitm] STORED id={} url={} key={} bytes={}",
+                        "[mitm] cache_decision=skip:empty_body id={} url={} key={} bytes=0",
                         meta.id,
                         short_url(&meta.url),
-                        meta.cache_key,
-                        body_bytes.len()
+                        meta.cache_key
                     );
+                } else {
+                    cache_decision = "store".to_string();
+                    let sidecar_headers = headers_for_sidecar(&forwarded);
+                    let metadata = Metadata {
+                        original_url: meta.url.clone(),
+                        content_type: content_type.clone(),
+                        etag,
+                        last_modified,
+                        saved_at: Utc::now().to_rfc3339(),
+                        forwarded_headers: sidecar_headers,
+                    };
+                    let cache_write_started_at = Instant::now();
+                    if let Err(e) =
+                        cache_store::write(&meta.cache_key, &body_bytes, &metadata).await
+                    {
+                        cache_write_ms = Some(elapsed_ms(cache_write_started_at));
+                        cache_decision = "store_failed".to_string();
+                        tracing::warn!(
+                            target: "hook",
+                            "[mitm] cache write failed id={} key={} err={} cache_write_ms={} (serving fresh response anyway)",
+                            meta.id,
+                            meta.cache_key,
+                            e,
+                            cache_write_ms.unwrap_or_default()
+                        );
+                    } else {
+                        cache_write_ms = Some(elapsed_ms(cache_write_started_at));
+                        tracing::info!(
+                            target: "hook",
+                            "[mitm] STORED id={} url={} key={} bytes={}",
+                            meta.id,
+                            short_url(&meta.url),
+                            meta.cache_key,
+                            body_bytes.len()
+                        );
+                    }
                 }
             }
         }
@@ -625,6 +638,10 @@ impl HttpHandler for PouchHandler {
         }
         response
     }
+}
+
+fn should_skip_cache_write_for_body(body_bytes: &[u8]) -> bool {
+    body_bytes.is_empty()
 }
 
 /// Reconstruct the absolute URL for a request. After `process_connect` →
@@ -759,4 +776,15 @@ fn build_response_from_cached(body: Vec<u8>, meta: Metadata) -> Response<Body> {
     builder
         .body(Body::from(body))
         .unwrap_or_else(|_| Response::new(Body::from(Vec::<u8>::new())))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn should_skip_cache_write_for_empty_body_only() {
+        assert!(should_skip_cache_write_for_body(&[]));
+        assert!(!should_skip_cache_write_for_body(b"x"));
+    }
 }

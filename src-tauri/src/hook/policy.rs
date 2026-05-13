@@ -343,15 +343,6 @@ async fn fetch_and_cache(
     // future HIT (currently just `Set-Cookie`). The remaining list goes
     // into the sidecar so HIT responses carry the same CORS / CSP / Vary /
     // Cache-Control surface as the original MISS.
-    let forwarded_for_sidecar = headers_for_sidecar(&extra_headers);
-    let meta = Metadata {
-        original_url: url.to_string(),
-        content_type: content_type.clone(),
-        etag,
-        last_modified,
-        saved_at: Utc::now().to_rfc3339(),
-        forwarded_headers: forwarded_for_sidecar,
-    };
     match cache_policy {
         CachePolicy::Skip { reason } => {
             info!(
@@ -364,20 +355,38 @@ async fn fetch_and_cache(
             );
         }
         CachePolicy::Store => {
-            if let Err(e) = cache_store::write(cache_key, &body_bytes, &meta).await {
-                warn!(
+            if body_bytes.is_empty() {
+                debug!(
                     target: "hook",
-                    "MISS write_failed key={} err={} (serving fresh response anyway)",
-                    cache_key, e
-                );
-            } else {
-                info!(
-                    target: "hook",
-                    "MISS key={} bytes={} ct={:?}",
+                    "MISS key={} bytes=0 ct={:?} cache_decision=skip:empty_body",
                     cache_key,
-                    body_bytes.len(),
                     content_type
                 );
+            } else {
+                let forwarded_for_sidecar = headers_for_sidecar(&extra_headers);
+                let meta = Metadata {
+                    original_url: url.to_string(),
+                    content_type: content_type.clone(),
+                    etag,
+                    last_modified,
+                    saved_at: Utc::now().to_rfc3339(),
+                    forwarded_headers: forwarded_for_sidecar,
+                };
+                if let Err(e) = cache_store::write(cache_key, &body_bytes, &meta).await {
+                    warn!(
+                        target: "hook",
+                        "MISS write_failed key={} err={} (serving fresh response anyway)",
+                        cache_key, e
+                    );
+                } else {
+                    info!(
+                        target: "hook",
+                        "MISS key={} bytes={} ct={:?}",
+                        cache_key,
+                        body_bytes.len(),
+                        content_type
+                    );
+                }
             }
         }
     }
@@ -427,6 +436,7 @@ async fn run_fetch(url: &str, request_headers: &http::HeaderMap) -> Option<reqwe
 mod tests {
     use super::*;
     use http::header::HeaderMap;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     /// `forward_response_headers` keeps semantically meaningful upstream
     /// headers (Set-Cookie, Cache-Control, ETag) and drops the hop-by-hop /
@@ -521,5 +531,61 @@ mod tests {
         assert_eq!(kept[2].0, "Vary");
         assert_eq!(kept[3].0, "ETag");
         assert_eq!(kept[4].0, "X-Custom");
+    }
+
+    #[tokio::test]
+    async fn evaluate_returns_empty_body_without_writing_cache() {
+        let temp_root = tempfile::tempdir().expect("temp cache root");
+        let _guard = cache_store::CACHE_ROOT_OVERRIDE_LOCK.lock().await;
+        std::env::set_var("CACHE_ROOT_OVERRIDE", temp_root.path());
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("test server addr");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept request");
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request).await.expect("read request");
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 0\r\n\r\n",
+                )
+                .await
+                .expect("write response");
+        });
+
+        let url = format!("http://{addr}/empty-policy-response.txt");
+        let cache_key = cache_store::cache_key_from_url(&url).expect("cache key");
+        let decision = evaluate(&url, &HeaderMap::new()).await;
+        server.await.expect("server task");
+
+        match decision {
+            Decision::Respond {
+                body, content_type, ..
+            } => {
+                assert!(body.is_empty());
+                assert_eq!(content_type.as_deref(), Some("text/plain"));
+            }
+            Decision::Bypass => panic!("empty 200 response should still be returned"),
+        }
+
+        assert!(
+            cache_store::read(&cache_key).await.is_none(),
+            "empty response bodies must not be persisted"
+        );
+        assert!(
+            !temp_root.path().join(&cache_key).exists(),
+            "cache body file should not exist for empty responses"
+        );
+        assert!(
+            !temp_root
+                .path()
+                .join(format!("{cache_key}.meta.json"))
+                .exists(),
+            "cache sidecar should not exist for empty responses"
+        );
+
+        std::env::remove_var("CACHE_ROOT_OVERRIDE");
     }
 }
