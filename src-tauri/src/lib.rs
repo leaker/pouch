@@ -12,9 +12,10 @@
 //! - Builds the main `WebviewWindow` programmatically with
 //!   `WebviewUrl::External(<first startup_urls entry>)` so the webview
 //!   navigates straight to the upstream origin; no frontend trampoline page
-//!   exists. The `initialization_script` carrying the URL-rule JS dispatcher
-//!   (see [`inject`]) runs on every top-level navigation, so user-supplied
-//!   `inject/*.js` rules apply on the live target site.
+//!   exists. The all-frame initialization script carrying the URL-rule JS
+//!   dispatcher (see [`inject`]) runs on every document navigation, so
+//!   user-supplied `inject/*.js` rules can apply to the live target site and
+//!   matching iframe URLs without duplicating non-matching scripts.
 //!   We deliberately do NOT call `.title(...)` so the upstream `<title>` wins.
 //!   To actually propagate `document.title` -> window title we register
 //!   [`tauri::webview::WebviewWindowBuilder::on_document_title_changed`],
@@ -43,10 +44,12 @@ pub mod updater;
 pub mod util;
 
 #[cfg(target_os = "macos")]
-use tauri::menu::{AboutMetadata, MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
+use tauri::menu::{
+    AboutMetadata, MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder,
+};
 use tauri::{
-    webview::PageLoadEvent,
-    AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent,
+    webview::PageLoadEvent, AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
+    WindowEvent,
 };
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -196,12 +199,10 @@ pub fn run() {
                 MenuItemBuilder::with_id(MENU_ID_CHECK_FOR_UPDATES, "Check for Updates\u{2026}")
                     .build(handle)?;
 
-            let reveal_folder = MenuItemBuilder::with_id(
-                MENU_ID_REVEAL_FOLDER,
-                "Reveal Pouch Folder in Finder",
-            )
-            .accelerator("CmdOrCtrl+Shift+O")
-            .build(handle)?;
+            let reveal_folder =
+                MenuItemBuilder::with_id(MENU_ID_REVEAL_FOLDER, "Reveal Pouch Folder in Finder")
+                    .accelerator("CmdOrCtrl+Shift+O")
+                    .build(handle)?;
             let reload = MenuItemBuilder::with_id(MENU_ID_RELOAD, "Reload from Config")
                 .accelerator("CmdOrCtrl+R")
                 .build(handle)?;
@@ -284,16 +285,12 @@ pub fn run() {
             // list (with `Cmd+`` cycling and a checkmark on the
             // focused window) and append items like "Bring All to
             // Front" — none of which we have to track ourselves.
-            let window = SubmenuBuilder::with_id(
-                handle,
-                tauri::menu::WINDOW_SUBMENU_ID,
-                "Window",
-            )
-            .minimize()
-            .maximize()
-            .separator()
-            .close_window()
-            .build()?;
+            let window = SubmenuBuilder::with_id(handle, tauri::menu::WINDOW_SUBMENU_ID, "Window")
+                .minimize()
+                .maximize()
+                .separator()
+                .close_window()
+                .build()?;
 
             MenuBuilder::new(handle)
                 .item(&app_submenu)
@@ -320,8 +317,7 @@ pub fn run() {
                 // gated on Tauri's `unstable` feature; iterating
                 // `webview_windows()` and matching `is_focused()` is the
                 // stable equivalent (cheap — typically a small map).
-                let target = focused_webview_window(app)
-                    .or_else(|| app.get_webview_window("main"));
+                let target = focused_webview_window(app).or_else(|| app.get_webview_window("main"));
                 if let Some(webview) = target {
                     let was_open = webview.is_devtools_open();
                     if was_open {
@@ -515,7 +511,12 @@ pub fn run() {
                     );
                     std::process::exit(0);
                 }
-                create_main_window_with_url(app, url, cfg.window_dimensions, dispatcher.as_deref())?;
+                create_main_window_with_url(
+                    app,
+                    url,
+                    cfg.window_dimensions,
+                    dispatcher.as_deref(),
+                )?;
             } else {
                 for (i, url_str) in cfg.startup_urls.iter().enumerate() {
                     // We pre-validated http(s) prefix at config load time,
@@ -534,12 +535,20 @@ pub fn run() {
                         }
                     };
                     if i == 0 {
-                        create_main_window_with_url(app, url, cfg.window_dimensions, dispatcher.as_deref())?;
+                        create_main_window_with_url(
+                            app,
+                            url,
+                            cfg.window_dimensions,
+                            dispatcher.as_deref(),
+                        )?;
                     } else {
                         let label = dialog::next_window_label();
-                        if let Err(e) =
-                            dialog::open_extra_window(app.handle(), &label, url, cfg.window_dimensions)
-                        {
+                        if let Err(e) = dialog::open_extra_window(
+                            app.handle(),
+                            &label,
+                            url,
+                            cfg.window_dimensions,
+                        ) {
                             tracing::warn!(
                                 target: "hook",
                                 "[startup] failed to create extra window {label}: {e}"
@@ -591,7 +600,12 @@ pub fn run() {
                         );
                         std::process::exit(0);
                     }
-                    create_main_window_with_url(app, url, cfg.window_dimensions, dispatcher.as_deref())?;
+                    create_main_window_with_url(
+                        app,
+                        url,
+                        cfg.window_dimensions,
+                        dispatcher.as_deref(),
+                    )?;
                 }
             }
 
@@ -795,7 +809,7 @@ fn create_main_window_with_url(
     }
 
     if let Some(js) = dispatcher {
-        builder = builder.initialization_script(js);
+        builder = builder.initialization_script_for_all_frames(js);
     }
 
     // Hook every webview-initiated new-window request — `window.open(url)`,

@@ -23,10 +23,12 @@
  *        - multiple `@match` lines are allowed; any single match triggers the rule
  *
  * A note on `@match *`:
- *   `*` matches every URL indiscriminately, including sub-frames / iframes
- *   inside the target page. A safer default is `@match https://*`, which only
- *   matches http(s) origins and skips special frames like `about:blank` or
- *   `data:`. Narrow the scope explicitly when writing your own scripts.
+ *   Pouch treats a bare `*` as a top-frame startup fallback so this demo does
+ *   not run once for every iframe on the page. To target iframes, declare the
+ *   iframe URL explicitly, for example `@match https://widget.example.com/*`.
+ *   A safer broad web default is `@match https://*`, which only matches
+ *   http(s) origins and skips special frames like `about:blank` or `data:`.
+ *   Narrow the scope explicitly when writing your own scripts.
  *
  * Run timing and isolation:
  *   - Injected at document_start, before any of the page's own JS runs (same

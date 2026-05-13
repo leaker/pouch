@@ -160,7 +160,8 @@ Rules:
 - **`@match`** — required. Glob form by default (`*` matches any characters, crossing `/`); prefix with `regex:` to switch to a real regex (`@match regex:^https://(api|cdn)\.example\.com/`). Multiple `@match` lines are allowed; any one matching triggers the rule.
 - **`@name`** — optional label that shows up in startup logs.
 - **No `@match` line** → file is skipped at scan time with a warning. Comment out every `@match` to disable a script temporarily without deleting it.
-- Scripts run at **document_start**, before the page's own JavaScript, in their own try/catch — a thrown error in one script never breaks the others.
+- Scripts run at **document_start**, before the page's own JavaScript, in their own try/catch — a thrown error in one script never breaks the others. The dispatcher is present in all frames, but each frame only runs scripts whose `@match` rules match that frame's own `location.href`.
+- A bare `@match *` is the top-frame startup fallback only. It does not run in iframes; add an explicit iframe URL glob or regex when you want a script to run inside a frame.
 - SPA route changes do **not** re-trigger scripts. Hook the History API yourself if you need that.
 
 A safer default than `@match *` is `@match https://*`, which skips `about:blank` and `data:` frames.

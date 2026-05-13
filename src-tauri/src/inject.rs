@@ -20,6 +20,9 @@
 //!   Tampermonkey extensions are intentionally **not** parsed; lines starting
 //!   with `// @<word>` we don't recognise are silently ignored, which lets the
 //!   user paste typical userscripts without us erroring out.
+//! - A bare `@match *` is treated as the top-frame startup fallback. It does
+//!   not match subframes; iframe rules must name the iframe URL explicitly
+//!   (glob or regex) so the default sample script does not run once per frame.
 //!
 //! Note on dynamic JS execution: the dispatcher runs `inject/*.js` bodies via
 //! a `Function` constructor. This is deliberate — these files are part of
@@ -74,9 +77,7 @@ fn collect_js_files(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
         let file_type = entry.file_type()?;
         if file_type.is_dir() {
             collect_js_files(&path, out)?;
-        } else if file_type.is_file()
-            && path.extension().and_then(|s| s.to_str()) == Some("js")
-        {
+        } else if file_type.is_file() && path.extension().and_then(|s| s.to_str()) == Some("js") {
             out.push(path);
         }
     }
@@ -190,6 +191,12 @@ pub fn build_dispatcher_js(rules: &[InjectRule]) -> Option<String> {
 
     // Dispatcher template. Notes:
     // - Wrapped in IIFE + `'use strict'`.
+    // - The dispatcher is attached to all frames by the window builders, but
+    //   rule execution is still per-frame: every rule is checked against this
+    //   frame's own `location.href`.
+    // - A bare `@match *` is a top-frame fallback only. Subframes must match
+    //   a non-fallback pattern, which avoids running the default global rule
+    //   once for every iframe on a page.
     // - Glob escaping covers RegExp metachars; `*` is then re-introduced as
     //   `.*` (greedy — matches across `/` deliberately, which is the
     //   simpler-than-Tampermonkey semantics the brief picked).
@@ -199,7 +206,9 @@ pub fn build_dispatcher_js(rules: &[InjectRule]) -> Option<String> {
     let js = format!(
         r#"(function(){{
 'use strict';
-var url=location.href;
+var frameUrl=location.href;
+var isTopFrame=false;
+try{{isTopFrame=window===window.top;}}catch(e){{isTopFrame=false;}}
 function matchGlob(pattern,url){{
   var re=new RegExp('^'+pattern.replace(/[.+?^${{}}()|[\]\\]/g,'\\$&').replace(/\*/g,'.*')+'$');
   return re.test(url);
@@ -208,11 +217,16 @@ function matchRegex(pattern,url){{
   try{{return new RegExp(pattern).test(url);}}
   catch(e){{console.error('[hook-inject] bad regex:',pattern,e);return false;}}
 }}
+function isCatchAllFallback(p){{return p.kind==='glob'&&p.value==='*';}}
+function matchPattern(p,url){{return p.kind==='regex'?matchRegex(p.value,url):matchGlob(p.value,url);}}
 var rules=[{entries}];
 rules.forEach(function(rule){{
+  var fallbackHit=false;
   var hit=rule.patterns.some(function(p){{
-    return p.kind==='regex'?matchRegex(p.value,url):matchGlob(p.value,url);
+    if(isCatchAllFallback(p)){{fallbackHit=true;return false;}}
+    return matchPattern(p,frameUrl);
   }});
+  if(!hit&&isTopFrame&&fallbackHit) hit=true;
   if(!hit) return;
   try{{(new Function(rule.code))();}}
   catch(e){{console.error('[hook-inject] rule "'+rule.name+'" failed:',e);}}
@@ -427,6 +441,35 @@ console.log('body');
         assert!(js.contains("\\\\"));
         // Pattern kind labels render as JSON literals too.
         assert!(js.contains("\"glob\""));
+    }
+
+    #[test]
+    fn build_dispatcher_js_matches_against_current_frame_url() {
+        let rule = InjectRule {
+            name: "frame-specific".into(),
+            patterns: vec![MatchPattern::Glob("https://iframe.example/*".into())],
+            code: "window.__ranFrameSpecific = true;".into(),
+        };
+        let js = build_dispatcher_js(&[rule]).expect("should produce dispatcher");
+
+        assert!(js.contains("var frameUrl=location.href;"));
+        assert!(js.contains("return matchPattern(p,frameUrl);"));
+        assert!(!js.contains("top.location"));
+        assert!(!js.contains("parent.location"));
+    }
+
+    #[test]
+    fn build_dispatcher_js_does_not_use_catch_all_for_subframe_fallback() {
+        let rule = InjectRule {
+            name: "top-fallback".into(),
+            patterns: vec![MatchPattern::Glob("*".into())],
+            code: "window.__ranTopFallback = true;".into(),
+        };
+        let js = build_dispatcher_js(&[rule]).expect("should produce dispatcher");
+
+        assert!(js.contains("function isCatchAllFallback"));
+        assert!(js.contains("fallbackHit=true;return false;"));
+        assert!(js.contains("if(!hit&&isTopFrame&&fallbackHit) hit=true;"));
     }
 
     #[test]

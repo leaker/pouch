@@ -411,11 +411,13 @@ pub fn open_extra_window(
     // Apply the same `inject/*.js` dispatcher the main window uses, sourced
     // from `DispatcherState` (managed once at startup). Reading from state
     // here means startup-tail / Cmd+N / `window.open` / `<a target=_blank>` /
-    // `<form target=_blank>` paths all converge on the same script source —
-    // there's nothing window-specific about it.
+    // `<form target=_blank>` paths all converge on the same script source.
+    // The carrier is installed in all frames, but the dispatcher itself
+    // filters against each frame's own `location.href` before running any
+    // user script.
     if let Some(state) = app.try_state::<DispatcherState>() {
         if let Some(js) = state.0.as_deref() {
-            builder = builder.initialization_script(js);
+            builder = builder.initialization_script_for_all_frames(js);
         }
     }
 
@@ -426,9 +428,8 @@ pub fn open_extra_window(
     // [`spawn_pouch_window_for_request`] for the contract, including the
     // POST-form body limitation imposed by wry's URL-only callback.
     let app_for_cb = app.clone();
-    builder = builder.on_new_window(move |url, _features| {
-        spawn_pouch_window_for_request(&app_for_cb, url)
-    });
+    builder = builder
+        .on_new_window(move |url, _features| spawn_pouch_window_for_request(&app_for_cb, url));
 
     let window = builder.build()?;
     tracing::debug!(
