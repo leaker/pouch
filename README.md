@@ -80,7 +80,7 @@ Starting with v2.1.0, Pouch stores its data in `%APPDATA%\Pouch\` instead of nex
 
 ## Configuration
 
-Pouch reads a single TOML file on launch. Edit it and hit Reload (`Cmd/Ctrl+R`) to apply.
+Pouch reads a single TOML file on launch. On macOS, edit it and hit Reload (`Cmd+R`, or View → Reload from Config) to apply. On Windows, quit and relaunch to pick up changes.
 
 | Platform | Path |
 |---|---|
