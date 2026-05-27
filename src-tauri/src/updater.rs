@@ -461,10 +461,16 @@ fn is_scoop_install() -> bool {
 async fn prompt_and_install(app: &AppHandle, update: tauri_plugin_updater::Update) {
     let version = update.version.clone();
     let notes = update.body.clone().unwrap_or_default();
+    // Footer is shown on the confirmation dialog so users who hit the
+    // macOS relaunch bug (tauri-apps/tauri#13923, where `app.restart()`
+    // only shuts down) know to reopen Pouch themselves. The `open -n`
+    // fallback below handles the bug for most users, but keeping this
+    // line costs nothing and rescues anyone the fallback misses.
+    let relaunch_hint = "If the app doesn't relaunch automatically, please reopen it manually.";
     let message = if notes.trim().is_empty() {
-        format!("Pouch v{version} is available.\n\nUpdate now?")
+        format!("Pouch v{version} is available.\n\nUpdate now?\n\n{relaunch_hint}")
     } else {
-        format!("Pouch v{version} is available.\n\n{notes}\n\nUpdate now?")
+        format!("Pouch v{version} is available.\n\n{notes}\n\nUpdate now?\n\n{relaunch_hint}")
     };
 
     // `blocking_show` is documented as safe off the main thread — we're
@@ -524,12 +530,53 @@ async fn prompt_and_install(app: &AppHandle, update: tauri_plugin_updater::Updat
         return;
     }
 
-    // The updater plugin auto-restarts after a successful install on every
-    // platform we support, but `app.restart()` is documented as `-> !` and
-    // safe to call as a fallback in case the plugin chose not to restart
-    // (e.g. install completed without re-launch).
-    info!(target: "hook", "[updater] restarting to complete update");
-    app.restart();
+    // Workaround for tauri-apps/tauri#13923: on macOS, `app.restart()`
+    // shuts the process down but never relaunches the new bundle (since
+    // tauri-plugin-updater v2.5+). Spawn `open -n /Applications/Pouch.app`
+    // explicitly so LaunchServices brings up the freshly-installed bundle,
+    // then exit this (old) process. `current_exe()` resolves to
+    // `.../Pouch.app/Contents/MacOS/pouch`, so we walk three parents up to
+    // get the .app bundle root.
+    info!(target: "hook", "[updater] relaunching to complete update");
+    let bundle_path = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent()?.parent()?.parent().map(|p| p.to_path_buf()));
+
+    if let Some(bundle) = bundle_path {
+        info!(
+            target: "hook",
+            "[updater] relaunching via `open -n {}`",
+            bundle.display()
+        );
+        // `open -n` forces a new instance; LaunchServices owns the child
+        // after spawn, so the new Pouch survives this process exiting.
+        match std::process::Command::new("open")
+            .arg("-n")
+            .arg(&bundle)
+            .spawn()
+        {
+            Ok(_) => {
+                // Give LaunchServices a moment to actually start the new
+                // process before we tear down — exiting too quickly can
+                // race the spawn on slow machines.
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                std::process::exit(0);
+            }
+            Err(e) => {
+                warn!(
+                    target: "hook",
+                    "[updater] `open -n` failed: {e}; falling back to app.restart()"
+                );
+                app.restart();
+            }
+        }
+    } else {
+        warn!(
+            target: "hook",
+            "[updater] could not resolve .app bundle path; falling back to app.restart()"
+        );
+        app.restart();
+    }
 }
 
 #[cfg(target_os = "macos")]
